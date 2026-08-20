@@ -237,7 +237,7 @@ async function handleChat(req, res) {
   tasks.set(taskId, task);
 
   // 后台订阅桥接服务（不阻塞响应），前端断开也不影响
-  bridgeSubscribe(task).catch(() => {});
+  bridgeSubscribe(task).catch(() => { });
 
   return sendJson(res, 200, { taskId, status: "running" });
 }
@@ -251,7 +251,7 @@ function handleStream(req, res, taskId) {
   try {
     const u = new URL(req.url, `http://${req.headers.host}`);
     since = parseInt(u.searchParams.get("since") || "0", 10) || 0;
-  } catch {}
+  } catch { }
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",

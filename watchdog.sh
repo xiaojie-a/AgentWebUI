@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# =============================================================
+# agentwebui 守护进程（watchdog）
+# 功能: 定时检查 bridge / webui / ollama，挂掉自动拉起，
+#       防止 Android 系统回收后台进程导致服务中断。
+# 启动: bash watchdog.sh start
+# 停止: bash watchdog.sh stop
+# 状态: bash watchdog.sh status
+# =============================================================
+set -u
+cd "$(dirname "$0")"
+
+LOG="logs/watchdog.log"
+PID_FILE=".pids/watchdog.pid"
+NODE="${NODE_BIN:-node}"
+BRIDGE_PORT="${BRIDGE_PORT:-8765}"
+WEB_PORT="${PORT:-3000}"
+
+ts() { date '+%F %T'; }
+log() { echo "[$(ts)] $*" >> "$LOG"; }
+
+start_watchdog() {
+  mkdir -p logs .pids
+  if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    echo "watchdog 已在运行 (pid $(cat "$PID_FILE"))"
+    return
+  fi
+  nohup bash "$0" loop >/dev/null 2>&1 </dev/null &
+  echo $! > "$PID_FILE"
+  echo "watchdog 已启动 (pid $(cat "$PID_FILE"))"
+}
+
+stop_watchdog() {
+  if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    kill "$(cat "$PID_FILE")" 2>/dev/null
+    rm -f "$PID_FILE"
+    echo "watchdog 已停止"
+  else
+    rm -f "$PID_FILE"
+    echo "watchdog 未在运行"
+  fi
+}
+
+status_watchdog() {
+  local wd="未运行"
+  if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    wd="运行中 (pid $(cat "$PID_FILE"))"
+  fi
+  echo "watchdog: $wd"
+  curl -s -m 2 "http://127.0.0.1:$BRIDGE_PORT/health" >/dev/null 2>&1 \
+    && echo "bridge:  OK" || echo "bridge:  DOWN"
+  curl -s -m 2 "http://127.0.0.1:$WEB_PORT/api/health" >/dev/null 2>&1 \
+    && echo "webui:   OK" || echo "webui:   DOWN"
+}
+
+# 单服务守护：端口不通则杀掉旧进程并拉起
+ensure() {
+  local name="$1" port="$2" cmd="$3" pidfile="$4" logfile="$5"
+  if curl -s -m 2 "http://127.0.0.1:$port" >/dev/null 2>&1; then
+    return
+  fi
+  local oldpid=""
+  [ -f "$pidfile" ] && oldpid="$(cat "$pidfile")"
+  [ -n "$oldpid" ] && kill "$oldpid" 2>/dev/null
+  log "[$name] 失联，正在重启..."
+  nohup $cmd >>"$logfile" 2>&1 </dev/null &
+  echo $! > "$pidfile"
+  log "[$name] 已重启 (pid $(cat "$pidfile"))"
+}
+
+loop() {
+  log "watchdog 守护已启动 (PID $$)"
+  while true; do
+    ensure "bridge" "$BRIDGE_PORT" "$NODE agent_bridge.js" ".pids/bridge.pid" "logs/bridge.log"
+    ensure "webui"  "$WEB_PORT"    "$NODE server.js"       ".pids/web.pid"    "logs/web.log"
+    if command -v ollama >/dev/null 2>&1; then
+      ensure "ollama" "11434" "ollama serve" ".pids/ollama.pid" "logs/ollama.log"
+    fi
+    sleep 10
+  done
+}
+
+case "${1:-}" in
+  start)  start_watchdog ;;
+  stop)   stop_watchdog ;;
+  status) status_watchdog ;;
+  loop)   loop ;;
+  *) echo "用法: bash watchdog.sh [start|stop|status]"; exit 1 ;;
+esac

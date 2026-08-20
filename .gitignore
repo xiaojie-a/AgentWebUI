@@ -15,3 +15,6 @@ node_modules/
 # 系统
 .DS_Store
 Thumbs.db
+
+# 覆盖前备份
+*.bak_orig
