@@ -1,0 +1,17 @@
+# 运行时数据
+.pids/
+logs/
+__pycache__/
+*.pyc
+_bgtest.txt
+
+# 依赖
+node_modules/
+
+# 环境变量/密钥（如有）
+.env
+*.local
+
+# 系统
+.DS_Store
+Thumbs.db

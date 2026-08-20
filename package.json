@@ -1,0 +1,13 @@
+{
+  "name": "agent-mini-webui",
+  "version": "1.0.0",
+  "private": true,
+  "description": "agent-mini WebUI - Node backend + modern frontend",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

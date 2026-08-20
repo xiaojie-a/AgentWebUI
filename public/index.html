@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>agent-mini</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>✨</text></svg>" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- 背景装饰 -->
+  <div class="bg-orbs" aria-hidden="true">
+    <div class="orb orb-1"></div>
+    <div class="orb orb-2"></div>
+    <div class="orb orb-3"></div>
+  </div>
+
+  <div class="app">
+    <!-- 侧边栏 -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span class="logo-mark">✦</span>
+          <span class="logo-text">agent-mini</span>
+        </div>
+        <button class="icon-btn" id="toggleSidebar" title="收起侧边栏">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+      </div>
+
+      <button class="new-chat-btn" id="newChatBtn">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        新对话
+      </button>
+
+      <div class="conv-list" id="convList"></div>
+
+      <div class="sidebar-footer">
+        <button class="footer-btn" id="settingsBtn" title="设置">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09a1.65 1.65 0 00-1-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09a1.65 1.65 0 001.51-1 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33h0a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51h0a1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82v0a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+          设置
+        </button>
+        <button class="footer-btn" id="themeBtn" title="切换主题">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+          主题
+        </button>
+      </div>
+    </aside>
+
+    <!-- 主区域 -->
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-btn" id="menuBtn" title="菜单">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+        </button>
+        <div class="topbar-title" id="topbarTitle">新对话</div>
+        <div class="model-badge" id="modelBadge">…</div>
+      </header>
+
+      <div class="chat-scroll" id="chatScroll">
+        <!-- 欢迎页 -->
+        <div class="welcome" id="welcome">
+          <div class="welcome-logo">✦</div>
+          <h1>嗨，我是 <span class="grad-text">agent-mini</span></h1>
+          <p>跑在你本机 Ollama 上的私人智能体，随便聊点什么吧</p>
+          <div class="suggestions" id="suggestions">
+            <button class="suggestion-card" data-q="帮我看看当前目录下有哪些文件，按大小排个序">
+              <span class="s-emoji">📂</span>
+              <span class="s-title">整理我的文件</span>
+              <span class="s-desc">让 agent 动手查看磁盘</span>
+            </button>
+            <button class="suggestion-card" data-q="帮我搜一下最近 AI 领域有什么大新闻，总结一下">
+              <span class="s-emoji">🌐</span>
+              <span class="s-title">上网搜新闻</span>
+              <span class="s-desc">调用 web 工具联网检索</span>
+            </button>
+            <button class="suggestion-card" data-q="写一个能定时提醒我写周报的 Python 脚本并保存到工作区">
+              <span class="s-emoji">🐍</span>
+              <span class="s-title">写个小工具</span>
+              <span class="s-desc">直接生成并落盘</span>
+            </button>
+            <button class="suggestion-card" data-q="记住：我喜欢简洁直接的回答。然后告诉我你记住了什么">
+              <span class="s-emoji">🧠</span>
+              <span class="s-title">试试记忆能力</span>
+              <span class="s-desc">agent-mini 的长期记忆</span>
+            </button>
+          </div>
+        </div>
+        <!-- 消息列表 -->
+        <div class="messages" id="messages"></div>
+      </div>
+
+      <!-- 输入区 -->
+      <div class="composer-wrap">
+        <div class="composer" id="composer">
+          <textarea id="input" rows="1" placeholder="说点什么… (Enter 发送，Shift+Enter 换行)"></textarea>
+          <button class="send-btn" id="sendBtn" title="发送">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M3.4 20.4l17.45-7.48c.81-.35.81-1.49 0-1.84L3.4 3.6c-.66-.29-1.39.2-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .72.73 1.2 1.39.91z"/></svg>
+          </button>
+        </div>
+        <div class="composer-hint">agent-mini 可能会犯错，重要内容请核实</div>
+      </div>
+    </main>
+
+    <!-- 侧边栏遮罩：必须放在 .app 内部，与 .sidebar 同处一个层叠上下文
+         （.sidebar 移动端 z-index:50 > 遮罩 40），否则 .app 的 z-index:1 会把遮罩
+         抬到侧边栏之上，遮罩盖住侧边栏导致无法点击 -->
+    <div class="sidebar-overlay" id="sidebarOverlay"></div>
+  </div>
+
+  <!-- 设置弹窗 -->
+  <div class="modal-mask" id="settingsModal" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h2>设置</h2>
+        <button class="icon-btn" id="closeSettings" title="关闭">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="modal-body" id="settingsInfo">
+        读取中…
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
