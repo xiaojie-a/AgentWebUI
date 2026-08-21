@@ -43,7 +43,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from agent_mini.config import load_config, MEMORY_FILE
+from agent_mini.config import load_config, save_config, MEMORY_FILE
 from agent_mini.providers import create_provider
 from agent_mini.agent import AgentLoop, Memory
 
@@ -313,6 +313,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, _basic_info())
             except Exception as e:
                 return self._json(500, {"error": str(e)})
+        if self.path == "/models":
+            try:
+                config = load_config()
+                active = config.get("provider", "ollama")
+                providers = config.get("providers", {})
+                models = []
+                for name, cfg in providers.items():
+                    models.append({
+                        "provider": name,
+                        "model": (cfg or {}).get("model", ""),
+                        "active": name == active,
+                    })
+                return self._json(200, {"active": active, "models": models})
+            except Exception as e:
+                return self._json(500, {"error": str(e)})
 
         m = re.match(r"^/task/([^/]+)/stream$", self.path)
         if m:
@@ -402,6 +417,29 @@ class Handler(BaseHTTPRequestHandler):
         self._json(404, {"error": "not found"})
 
     def do_POST(self):
+        if self.path == "/config":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length) or b"{}")
+            except Exception:
+                return self._json(400, {"error": "invalid JSON body"})
+            try:
+                config = load_config()
+                providers = config.get("providers", {})
+                provider = (payload.get("provider") or "").strip()
+                if not provider or provider not in providers:
+                    return self._json(400, {"error": f"未知的 provider: {provider}"})
+                model = (payload.get("model") or "").strip()
+                if model:
+                    providers[provider]["model"] = model
+                config["provider"] = provider
+                save_config(config)
+                new_model = providers[provider].get("model", "?")
+                print(f"[Config] 模型已切换 -> {provider} / {new_model}")
+                return self._json(200, {"ok": True, "provider": provider, "model": new_model})
+            except Exception as e:
+                return self._json(500, {"error": f"切换失败: {e}"})
+
         if self.path == "/cancel":
             try:
                 length = int(self.headers.get("Content-Length", "0"))

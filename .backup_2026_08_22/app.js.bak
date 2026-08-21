@@ -7,7 +7,7 @@
   const sidebar = $("sidebar"), sidebarOverlay = $("sidebarOverlay"), convList = $("convList"), messagesEl = $("messages"),
     welcomeEl = $("welcome"), chatScroll = $("chatScroll"), input = $("input"),
     sendBtn = $("sendBtn"), topbarTitle = $("topbarTitle"), modelBadge = $("modelBadge"),
-    modelSelect = $("modelSelect"), settingsModal = $("settingsModal");
+    settingsModal = $("settingsModal");
 
   // ---------- 状态 ----------
   let conversations = loadConvs();
@@ -128,62 +128,6 @@
     if (t.name === "phone_control" && a.action) return "调用手机控制工具：" + a.action;
     if (t.name === "shell_exec") return "调用 shell 执行底层命令";
     return "调用 " + (t.name || "工具") + " 执行操作";
-  }
-
-  // ---------- 工具事件合并 ----------
-  // 后端对每次工具调用会发两条事件：
-  //   ① 开始事件：带 arguments（命令），无 result_preview / duration
-  //   ② 结束事件：arguments 为 null，带 result_preview / is_error / duration
-  // 若直接追加会把同一次调用渲染成两个重复标签（🔧shell_exec🔧shell_exec）。
-  // 这里把两条按工具名配对合并成一条完整信息：命令 + 结果 + 耗时。
-
-  // 流式增量：把事件并入 ctx.tools（ctx.openTools 记录等待结束事件的开始条目）
-  function pushTool(ctx, inc) {
-    if (!ctx.openTools) ctx.openTools = {};
-    const isStart = inc.arguments !== null && inc.arguments !== undefined
-      && inc.duration == null;
-    if (isStart) {
-      // ① 开始事件：新增条目
-      const entry = Object.assign({}, inc);
-      ctx.tools.push(entry);
-      ctx.openTools[inc.name] = entry;
-    } else {
-      // ② 结束事件：合并到同名的开始条目（并发时可能多个同名，取最近一个）
-      const entry = ctx.openTools[inc.name] || ctx.tools[ctx.tools.length - 1];
-      if (entry && entry.name === inc.name) {
-        if (inc.result_preview != null) entry.result_preview = inc.result_preview;
-        if (inc.is_error != null) entry.is_error = inc.is_error;
-        if (inc.duration != null) entry.duration = inc.duration;
-      } else {
-        ctx.tools.push(Object.assign({}, inc));
-      }
-    }
-  }
-
-  // 恢复路径：对已收集的完整事件数组做同样的配对合并（就地返回新数组）
-  function normalizeTools(tools) {
-    const open = {};
-    const out = [];
-    for (const inc of (tools || [])) {
-      if (!inc || typeof inc !== "object") continue;
-      const isStart = inc.arguments !== null && inc.arguments !== undefined
-        && inc.duration == null;
-      if (isStart) {
-        const entry = Object.assign({}, inc);
-        out.push(entry);
-        open[inc.name] = entry;
-      } else {
-        const entry = open[inc.name] || out[out.length - 1];
-        if (entry && entry.name === inc.name) {
-          if (inc.result_preview != null) entry.result_preview = inc.result_preview;
-          if (inc.is_error != null) entry.is_error = inc.is_error;
-          if (inc.duration != null) entry.duration = inc.duration;
-        } else {
-          out.push(Object.assign({}, inc));
-        }
-      }
-    }
-    return out;
   }
 
   // 工具调用事件 -> 小标签（显示底层命令 + 中文原因）
@@ -317,7 +261,7 @@
       }
       if (st.status === "done" || st.status === "cancelled") {
         ctx.full = st.content || ctx.full;
-        if (st.tools && st.tools.length) ctx.tools = normalizeTools(st.tools);
+        ctx.tools = st.tools || ctx.tools;
         if (st.status === "done") ctx.normalDone = true;
         return "done";
       }
@@ -362,7 +306,7 @@
             try { data = JSON.parse(line.slice(5).trim()); } catch { continue; }
             ctx.eventIndex++;
             if (data.content) { ctx.statusTip = ""; ctx.full += data.content; repaint(true); }
-            if (data.tool) { pushTool(ctx, data.tool); repaint(true); }
+            if (data.tool) { ctx.tools.push(data.tool); repaint(true); }
             // 模型长时间无输出（Ollama 超时后 agent 内部重试）时的保活提示
             if (data.status === "working" && !ctx.full && !ctx.tools.length) {
               ctx.statusTip = `⏳ 模型响应较慢，请稍候…（已等待 ${data.silent_seconds || 0} 秒）`;
@@ -481,8 +425,7 @@
       if (st.content) {
         const last = conv.messages[conv.messages.length - 1];
         if (!(last && last.role === "assistant" && last.content === st.content)) {
-          const restoredTools = normalizeTools(st.tools);
-          conv.messages.push({ role: "assistant", content: st.content, tools: restoredTools && restoredTools.length ? restoredTools : undefined });
+          conv.messages.push({ role: "assistant", content: st.content, tools: st.tools && st.tools.length ? st.tools : undefined });
           saveConvs();
         }
         renderMessages();
@@ -492,7 +435,7 @@
       return;
     }
 
-    const ctx = { full: st.content || "", tools: normalizeTools(st.tools) || [], normalDone: false, eventIndex: st.event_count || 0 };
+    const ctx = { full: st.content || "", tools: st.tools || [], normalDone: false, eventIndex: st.event_count || 0 };
     let bubble = null;
     const repaint = (cursor) => {
       if (!bubble) return;
@@ -645,90 +588,14 @@
   $("closeSettings").onclick = () => (settingsModal.hidden = true);
   settingsModal.onclick = (e) => { if (e.target === settingsModal) settingsModal.hidden = true; };
 
-  // 当前选中的模型（provider/model），发送时其实无需传给后端——
-  // 因为切换模型时已直接改写 config.json，而每次 agent 任务都是新子进程
-  // 读配置，所以下一条消息自然就用新模型。这里仅用于 UI 状态展示。
-  let currentModel = { provider: "", model: "" };
-
-  // 加载模型列表并填充下拉框；bridgeModel 优先用 /api/models 的实时数据，
-  // 失败时回退到 /api/config（只拿当前 provider/model，无法列出全部）
   async function updateBadge() {
     try {
-      const r = await fetch("/api/models");
-      const data = await r.json();
-      if (data.bridge && Array.isArray(data.models) && data.models.length) {
-        renderModelPicker(data.models, data.active);
-        return;
-      }
-      // 桥接在线但无模型数据：回退到 /api/config
       const cfg = await (await fetch("/api/config")).json();
-      modelBadge.innerHTML = cfg.bridge
-        ? `<span class="dot"></span>${esc(cfg.provider)} · ${esc(cfg.model)}`
-        : `<span class="dot off"></span>agent-mini (离线)`;
-      modelSelect.innerHTML = "";
+      modelBadge.textContent = cfg.bridge ? `${cfg.provider} · ${cfg.model}` : "agent-mini (离线)";
     } catch {
-      modelBadge.innerHTML = `<span class="dot off"></span>agent-mini`;
-      modelSelect.innerHTML = "";
+      modelBadge.textContent = "agent-mini";
     }
   }
-
-  // 渲染模型下拉选择器
-  function renderModelPicker(models, activeProvider) {
-    modelSelect.innerHTML = "";
-    let activeFound = null;
-    for (const m of models) {
-      const opt = document.createElement("option");
-      opt.value = `${m.provider}||${m.model}`;
-      opt.textContent = `${m.provider} · ${m.model}`;
-      if (m.active || m.provider === activeProvider) {
-        opt.selected = true;
-        activeFound = m;
-      }
-      modelSelect.appendChild(opt);
-    }
-    if (activeFound) {
-      currentModel = { provider: activeFound.provider, model: activeFound.model };
-    } else if (models.length) {
-      currentModel = { provider: models[0].provider, model: models[0].model };
-    }
-    updateModelBadgeText();
-  }
-
-  function updateModelBadgeText() {
-    const p = currentModel.provider, m = currentModel.model;
-    modelBadge.innerHTML = (p && m)
-      ? `<span class="dot"></span>${esc(p)} · ${esc(m)}`
-      : `<span class="dot off"></span>…`;
-  }
-
-  // 切换模型：调 /api/config 改写 config.json，立即生效
-  async function switchModel(value) {
-    const [provider, model] = (value || "").split("||");
-    if (!provider) return;
-    modelBadge.classList.add("switching");
-    try {
-      const r = await fetch("/api/config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider, model }),
-      });
-      const data = await r.json();
-      if (r.ok && data.ok) {
-        currentModel = { provider: data.provider || provider, model: data.model || model };
-        updateModelBadgeText();
-      } else {
-        // 切换失败：回退显示
-        updateModelBadgeText();
-        console.warn("模型切换失败:", data.error);
-      }
-    } catch (err) {
-      updateModelBadgeText();
-      console.warn("模型切换请求失败:", err.message);
-    } finally {
-      modelBadge.classList.remove("switching");
-    }
-  }
-  modelSelect.addEventListener("change", () => switchModel(modelSelect.value));
 
   // ---------- 启动 ----------
   if (innerWidth <= 768) sidebar.classList.add("collapsed");

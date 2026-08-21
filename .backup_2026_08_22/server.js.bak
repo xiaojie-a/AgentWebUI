@@ -400,35 +400,6 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { provider: "agent-mini", model: "桥接服务未启动", bridge: false });
     }
   }
-  if (p === "/api/models" && req.method === "GET") {
-    try {
-      const r = await fetch(`${BRIDGE}/models`, { signal: AbortSignal.timeout(3000) });
-      const data = await r.json();
-      return sendJson(res, 200, { ...data, bridge: true });
-    } catch {
-      return sendJson(res, 200, { active: "", models: [], bridge: false });
-    }
-  }
-  if (p === "/api/config" && req.method === "POST") {
-    let payload;
-    try {
-      payload = JSON.parse(await readBody(req));
-    } catch {
-      return sendJson(res, 400, { error: "invalid JSON body" });
-    }
-    try {
-      const r = await fetch(`${BRIDGE}/config`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(3000),
-      });
-      const data = await r.json();
-      return sendJson(res, r.status, data);
-    } catch (err) {
-      return sendJson(res, 502, { error: `桥接服务不可用：${err.message}` });
-    }
-  }
   if (p === "/api/chat" && req.method === "POST") return handleChat(req, res);
 
   let m = p.match(/^\/api\/chat\/([^/]+)\/stream$/);

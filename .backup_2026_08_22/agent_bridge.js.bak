@@ -490,91 +490,25 @@ app.get('/health', (req, res) => {
     res.json({ ok: true, uptime: process.uptime() });
 });
 
-// ============ 配置文件路径 ============
-function getConfigPath() {
-    const home = process.env.HOME || require('os').homedir();
-    return process.env.AGENT_CONFIG || path.join(home, '.agent-mini', 'config.json');
-}
-
-// 读取配置（文件不存在时返回 null）
-function readConfig() {
-    const p = getConfigPath();
-    if (!fs.existsSync(p)) return null;
-    try { return JSON.parse(fs.readFileSync(p, 'utf8')); }
-    catch { return null; }
-}
-
 // ============ 获取信息 ============
 app.get('/info', (req, res) => {
     try {
-        const config = readConfig();
+        // 与 Python 版 load_config() 一致：读取 ~/.agent-mini/config.json
+        const home = process.env.HOME || require('os').homedir();
+        const configPath = process.env.AGENT_CONFIG
+            || path.join(home, '.agent-mini', 'config.json');
         let provider = 'ollama';
         let model = '?';
-        if (config) {
+
+        if (fs.existsSync(configPath)) {
+            const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
             provider = config.provider || 'ollama';
             model = (config.providers || {})[provider]?.model || '?';
         }
+
         res.json({ provider, model });
     } catch (err) {
         res.json({ provider: 'unknown', model: 'unknown' });
-    }
-});
-
-// ============ 列出可用模型 ============
-// 返回配置文件里已配置的所有 provider 及其模型，供前端下拉框填充。
-// 每次 agent 任务都是新子进程读配置，所以前端切换后下条消息立即生效。
-app.get('/models', (req, res) => {
-    try {
-        const config = readConfig();
-        if (!config) {
-            return res.json({ active: 'ollama', models: [] });
-        }
-        const active = config.provider || 'ollama';
-        const providers = config.providers || {};
-        const models = Object.keys(providers).map((name) => {
-            const cfg = providers[name] || {};
-            return {
-                provider: name,
-                model: cfg.model || '',
-                // 标注是否为当前生效的 provider
-                active: name === active,
-            };
-        });
-        res.json({ active, models });
-    } catch (err) {
-        res.json({ active: 'ollama', models: [], error: err.message });
-    }
-});
-
-// ============ 切换模型 ============
-// body: { provider: "ollama"|"local"|..., model: "qwen3:8b" }
-// 只在 config.json 里已有的 provider 之间切换，且只改 provider 字段和对应
-// providers[x].model 字段；绝不触碰 apiKey 等敏感字段。写回后立即生效。
-app.post('/config', (req, res) => {
-    try {
-        const { provider, model } = req.body || {};
-        const config = readConfig();
-        if (!config) {
-            return res.status(500).json({ error: '配置文件不存在或无法读取' });
-        }
-        const providers = config.providers || {};
-        if (!provider || !providers[provider]) {
-            return res.status(400).json({ error: `未知的 provider: ${provider}` });
-        }
-        // 切换 provider
-        config.provider = provider;
-        // 如果指定了模型且非空，更新对应 provider 的 model
-        if (model && String(model).trim()) {
-            providers[provider].model = String(model).trim();
-        }
-        // 写回
-        const configPath = getConfigPath();
-        fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-        const newModel = providers[provider].model || '?';
-        console.log(`[Config] 模型已切换 -> ${provider} / ${newModel}`);
-        res.json({ ok: true, provider, model: newModel });
-    } catch (err) {
-        res.status(500).json({ error: `切换失败: ${err.message}` });
     }
 });
 
