@@ -77,71 +77,14 @@
     return html;
   }
 
-  // 从工具参数中提取底层命令/动作字符串
-  function extractCommand(t) {
-    const a = t.arguments || {};
-    if (typeof a === "string") return a;
-    if (typeof a === "object" && a) {
-      if (a.cmd) return String(a.cmd);
-      if (a.command) return String(a.command);
-      if (a.action) {
-        const parts = ["action=" + a.action];
-        for (const k of ["x", "y", "x2", "y2", "text", "value", "title", "package", "keep", "keycode", "duration"]) {
-          if (a[k] !== undefined && a[k] !== "") parts.push(k + "=" + a[k]);
-        }
-        return parts.join(" ");
-      }
-    }
-    return "";
-  }
-
-  // 方案 A：基于 工具名 + 底层命令 自动生成中文说明（描述动作，非模型真实意图）
-  function describeReason(t) {
-    const cmd = extractCommand(t).toLowerCase();
-    const rules = [
-      [/screencap/, "执行手机截图（保存 PNG）"],
-      [/input\s+tap/, "模拟点击屏幕指定坐标"],
-      [/input\s+swipe/, "模拟滑动屏幕"],
-      [/input\s+keyevent\s+(\d+)/, (m) => {
-        const map = { 3: "返回桌面(Home)", 4: "返回上一级", 26: "电源键", 224: "点亮屏幕", 223: "熄灭屏幕", 164: "静音" };
-        return "发送按键：" + (map[m[1]] || ("按键码 " + m[1]));
-      }],
-      [/input\s+text/, "在输入框中输入文字"],
-      [/cmd\s+wifi/, "切换 WiFi 开关"],
-      [/bluetooth/, "切换蓝牙开关"],
-      [/vibrator/, "触发手机震动反馈"],
-      [/media_session\s+volume/, "调节媒体音量"],
-      [/notification\s+post/, "发送系统通知"],
-      [/dumpsys\s+location/, "获取当前定位信息"],
-      [/pm\s+list\s+packages/, "列出已安装应用"],
-      [/am\s+force-stop/, "强制停止指定应用"],
-      [/monkey\s+/, "启动指定应用"],
-      [/svc\s+power\s+stayon/, "设置屏幕保持常亮"],
-      [/leds\//, "控制 RGB 呼吸灯"],
-    ];
-    for (const [re, desc] of rules) {
-      const m = cmd.match(re);
-      if (m) return typeof desc === "function" ? desc(m) : desc;
-    }
-    // 语义化工具（如 phone_control）按 action 兜底
-    const a = t.arguments || {};
-    if (t.name === "phone_control" && a.action) return "调用手机控制工具：" + a.action;
-    if (t.name === "shell_exec") return "调用 shell 执行底层命令";
-    return "调用 " + (t.name || "工具") + " 执行操作";
-  }
-
-  // 工具调用事件 -> 小标签（显示底层命令 + 中文原因）
+  // 工具调用事件 -> 小标签
   function toolChip(t) {
-    const preview = (t.result_preview || "").replace(/\s+/g, " ").slice(0, 80);
-    const cmd = extractCommand(t);
-    const reason = describeReason(t);
+    const preview = (t.result_preview || "").replace(/\s+/g, " ").slice(0, 60);
     return `<div class="tool-chip${t.is_error ? " error" : ""}" title="${esc(JSON.stringify(t.arguments || {}))}">
       <span class="tool-icon">${t.is_error ? "⚠️" : "🔧"}</span>
       <span class="tool-name">${esc(t.name)}</span>
+      ${preview ? `<span class="tool-preview">${esc(preview)}</span>` : ""}
       ${t.duration ? `<span class="tool-time">${t.duration.toFixed(1)}s</span>` : ""}
-      ${cmd ? `<div class="tool-line"><span class="tool-lbl">命令</span><code class="tool-cmd">${esc(cmd).slice(0, 160)}</code></div>` : ""}
-      ${reason ? `<div class="tool-line"><span class="tool-lbl">原因</span><span class="tool-reason">${esc(reason)}</span></div>` : ""}
-      ${preview ? `<div class="tool-line"><span class="tool-lbl">结果</span><span class="tool-result">${esc(preview)}</span></div>` : ""}
     </div>`;
   }
 
