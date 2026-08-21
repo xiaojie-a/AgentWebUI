@@ -3,6 +3,8 @@
 # agentwebui 守护进程（watchdog）
 # 功能: 定时检查 bridge / webui / ollama，挂掉自动拉起，
 #       防止 Android 系统回收后台进程导致服务中断。
+#       每 GIT_SYNC_INTERVAL 次循环（默认 60 次 ≈ 10 分钟）
+#       自动 git pull Gitee 仓库，代码更新则重启服务生效。
 # 启动: bash watchdog.sh start
 # 停止: bash watchdog.sh stop
 # 状态: bash watchdog.sh status
@@ -15,6 +17,11 @@ PID_FILE=".pids/watchdog.pid"
 NODE="${NODE_BIN:-node}"
 BRIDGE_PORT="${BRIDGE_PORT:-8765}"
 WEB_PORT="${PORT:-3000}"
+
+# 自动拉取配置：循环次数间隔（10s × 60 = 10 分钟一次）
+GIT_SYNC_INTERVAL="${GIT_SYNC_INTERVAL:-60}"
+GIT_REMOTE="${GIT_REMOTE:-origin}"
+GIT_BRANCH="${GIT_BRANCH:-main}"
 
 ts() { date '+%F %T'; }
 log() { echo "[$(ts)] $*" >> "$LOG"; }
@@ -68,13 +75,40 @@ ensure() {
   log "[$name] 已重启 (pid $(cat "$pidfile"))"
 }
 
+# 自动拉取 Gitee 更新：ff-only 安全快进，代码变化则重启 bridge/webui
+git_sync() {
+  command -v git >/dev/null 2>&1 || { log "git_sync: git 未安装，跳过"; return; }
+  [ -d .git ] || { log "git_sync: 非 git 仓库，跳过"; return; }
+  local before after
+  before="$(git rev-parse --short HEAD 2>/dev/null)"
+  git fetch "$GIT_REMOTE" "$GIT_BRANCH" >/dev/null 2>&1
+  if ! git merge --ff-only "$GIT_REMOTE/$GIT_BRANCH" >/dev/null 2>&1; then
+    log "git_sync: 拉取失败（可能有本地改动冲突），保留当前版本"
+    return
+  fi
+  after="$(git rev-parse --short HEAD 2>/dev/null)"
+  if [ "$before" != "$after" ]; then
+    log "git_sync: 代码已更新 $before -> $after，重启服务生效"
+    # 杀掉 bridge/webui 旧进程，下一轮 ensure 会自动拉起新代码
+    [ -f ".pids/bridge.pid" ] && kill "$(cat .pids/bridge.pid)" 2>/dev/null
+    [ -f ".pids/web.pid" ] && kill "$(cat .pids/web.pid)" 2>/dev/null
+  fi
+}
+
 loop() {
+  local i=0
   log "watchdog 守护已启动 (PID $$)"
   while true; do
     ensure "bridge" "$BRIDGE_PORT" "$NODE agent_bridge.js" ".pids/bridge.pid" "logs/bridge.log"
     ensure "webui"  "$WEB_PORT"    "$NODE server.js"       ".pids/web.pid"    "logs/web.log"
     if command -v ollama >/dev/null 2>&1; then
       ensure "ollama" "11434" "ollama serve" ".pids/ollama.pid" "logs/ollama.log"
+    fi
+    # 每 N 次循环自动拉取一次（默认 60 次 ≈ 10 分钟）
+    i=$((i + 1))
+    if [ $i -ge "$GIT_SYNC_INTERVAL" ]; then
+      i=0
+      git_sync
     fi
     sleep 10
   done
