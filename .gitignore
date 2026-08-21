@@ -18,3 +18,6 @@ Thumbs.db
 
 # 覆盖前备份
 *.bak_orig
+
+# 同步前备份
+*.bak_sync0821
