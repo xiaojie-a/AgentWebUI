@@ -7,7 +7,7 @@
   const sidebar = $("sidebar"), sidebarOverlay = $("sidebarOverlay"), convList = $("convList"), messagesEl = $("messages"),
     welcomeEl = $("welcome"), chatScroll = $("chatScroll"), input = $("input"),
     sendBtn = $("sendBtn"), topbarTitle = $("topbarTitle"), modelBadge = $("modelBadge"),
-    modelSelect = $("modelSelect"), settingsModal = $("settingsModal");
+    settingsModal = $("settingsModal");
 
   // ---------- 状态 ----------
   let conversations = loadConvs();
@@ -130,74 +130,35 @@
     return "调用 " + (t.name || "工具") + " 执行操作";
   }
 
-  // ---------- 工具事件合并 ----------
-  // 后端对每次工具调用会发两条事件：
-  //   ① 开始事件：带 arguments（命令），无 result_preview / duration
-  //   ② 结束事件：arguments 为 null，带 result_preview / is_error / duration
-  // 若直接追加会把同一次调用渲染成两个重复标签（🔧shell_exec🔧shell_exec）。
-  // 这里把两条按工具名配对合并成一条完整信息：命令 + 结果 + 耗时。
-
-  // 流式增量：把事件并入 ctx.tools（ctx.openTools 记录等待结束事件的开始条目）
-  function pushTool(ctx, inc) {
-    if (!ctx.openTools) ctx.openTools = {};
-    const isStart = inc.arguments !== null && inc.arguments !== undefined
-      && inc.duration == null;
-    if (isStart) {
-      // ① 开始事件：新增条目
-      const entry = Object.assign({}, inc);
-      ctx.tools.push(entry);
-      ctx.openTools[inc.name] = entry;
-    } else {
-      // ② 结束事件：合并到同名的开始条目（并发时可能多个同名，取最近一个）
-      const entry = ctx.openTools[inc.name] || ctx.tools[ctx.tools.length - 1];
-      if (entry && entry.name === inc.name) {
-        if (inc.result_preview != null) entry.result_preview = inc.result_preview;
-        if (inc.is_error != null) entry.is_error = inc.is_error;
-        if (inc.duration != null) entry.duration = inc.duration;
-      } else {
-        ctx.tools.push(Object.assign({}, inc));
-      }
-    }
-  }
-
-  // 恢复路径：对已收集的完整事件数组做同样的配对合并（就地返回新数组）
-  function normalizeTools(tools) {
-    const open = {};
-    const out = [];
-    for (const inc of (tools || [])) {
-      if (!inc || typeof inc !== "object") continue;
-      const isStart = inc.arguments !== null && inc.arguments !== undefined
-        && inc.duration == null;
-      if (isStart) {
-        const entry = Object.assign({}, inc);
-        out.push(entry);
-        open[inc.name] = entry;
-      } else {
-        const entry = open[inc.name] || out[out.length - 1];
-        if (entry && entry.name === inc.name) {
-          if (inc.result_preview != null) entry.result_preview = inc.result_preview;
-          if (inc.is_error != null) entry.is_error = inc.is_error;
-          if (inc.duration != null) entry.duration = inc.duration;
-        } else {
-          out.push(Object.assign({}, inc));
-        }
-      }
-    }
-    return out;
-  }
-
-  // 工具调用事件 -> 小标签（显示底层命令 + 中文原因）
+  // 工具调用事件 -> 可折叠标签：默认折叠为灰色摘要行（action=xx 参数=yy ›），点击箭头展开命令/原因/结果
   function toolChip(t) {
     const preview = (t.result_preview || "").replace(/\s+/g, " ").slice(0, 80);
     const cmd = extractCommand(t);
     const reason = describeReason(t);
-    return `<div class="tool-chip${t.is_error ? " error" : ""}" title="${esc(JSON.stringify(t.arguments || {}))}">
-      <span class="tool-icon">${t.is_error ? "⚠️" : "🔧"}</span>
-      <span class="tool-name">${esc(t.name)}</span>
-      ${t.duration ? `<span class="tool-time">${t.duration.toFixed(1)}s</span>` : ""}
-      ${cmd ? `<div class="tool-line"><span class="tool-lbl">命令</span><code class="tool-cmd">${esc(cmd).slice(0, 160)}</code></div>` : ""}
-      ${reason ? `<div class="tool-line"><span class="tool-lbl">原因</span><span class="tool-reason">${esc(reason)}</span></div>` : ""}
-      ${preview ? `<div class="tool-line"><span class="tool-lbl">结果</span><span class="tool-result">${esc(preview)}</span></div>` : ""}
+    // 摘要：action=xxx 其他 key=value
+    const args = t.arguments || {};
+    const parts = [];
+    if (args.action) parts.push(`action=${args.action}`);
+    for (const [k, v] of Object.entries(args)) {
+      if (k === "action" || v === undefined || v === null || v === "") continue;
+      const s = String(v);
+      parts.push(`${k}=${s.length > 28 ? s.slice(0, 28) + "…" : s}`);
+    }
+    const summary = parts.join(" ") || preview || "(无参数)";
+    const detail = [
+      cmd ? `<div class="tool-line"><span class="tool-lbl">命令</span><code class="tool-cmd">${esc(cmd).slice(0, 160)}</code></div>` : "",
+      reason ? `<div class="tool-line"><span class="tool-lbl">原因</span><span class="tool-reason">${esc(reason)}</span></div>` : "",
+      preview ? `<div class="tool-line"><span class="tool-lbl">结果</span><span class="tool-result">${esc(preview)}</span></div>` : "",
+    ].join("");
+    return `<div class="tool-chip${t.is_error ? " error" : ""}" title="${esc(JSON.stringify(args))}">
+      <button type="button" class="tool-head">
+        <span class="tool-icon">${t.is_error ? "⚠️" : "🔧"}</span>
+        <span class="tool-name">${esc(t.name)}</span>
+        <code class="tool-summary">${esc(summary)}</code>
+        ${t.duration ? `<span class="tool-time">${t.duration.toFixed(1)}s</span>` : ""}
+        <span class="tool-toggle">›</span>
+      </button>
+      <div class="tool-detail">${detail || `<div class="tool-line"><span class="tool-lbl">结果</span><span class="tool-result">（无输出）</span></div>`}</div>
     </div>`;
   }
 
@@ -317,7 +278,8 @@
       }
       if (st.status === "done" || st.status === "cancelled") {
         ctx.full = st.content || ctx.full;
-        if (st.tools && st.tools.length) ctx.tools = normalizeTools(st.tools);
+        ctx.tools = st.tools || ctx.tools;
+        if (ctx.rebuild) ctx.rebuild();
         if (st.status === "done") ctx.normalDone = true;
         return "done";
       }
@@ -361,16 +323,27 @@
             let data;
             try { data = JSON.parse(line.slice(5).trim()); } catch { continue; }
             ctx.eventIndex++;
-            if (data.content) { ctx.statusTip = ""; ctx.full += data.content; repaint(true); }
-            if (data.tool) { pushTool(ctx, data.tool); repaint(true); }
+            if (data.content) {
+              ctx.statusTip = "";
+              ctx.full += data.content;
+              if (ctx.addText) ctx.addText(data.content);
+              if (ctx.setCursor) ctx.setCursor(true);
+              if (ctx.smartScroll) ctx.smartScroll(); else scrollBottom();
+            }
+            if (data.tool) {
+              ctx.tools.push(data.tool);
+              if (ctx.addTool) ctx.addTool(data.tool);
+              if (ctx.setCursor) ctx.setCursor(true);
+              if (ctx.smartScroll) ctx.smartScroll(); else scrollBottom();
+            }
             // 模型长时间无输出（Ollama 超时后 agent 内部重试）时的保活提示
             if (data.status === "working" && !ctx.full && !ctx.tools.length) {
               ctx.statusTip = `⏳ 模型响应较慢，请稍候…（已等待 ${data.silent_seconds || 0} 秒）`;
-              repaint(false);
+              if (ctx.syncTip) ctx.syncTip();
             }
-            if (data.done) { ctx.normalDone = true; return; }
-            if (data.cancelled) { return; }
-            if (data.error) { throw new Error(data.error); }
+            if (data.done) { if (ctx.setCursor) ctx.setCursor(false); ctx.normalDone = true; return; }
+            if (data.cancelled) { if (ctx.setCursor) ctx.setCursor(false); return; }
+            if (data.error) { if (ctx.setCursor) ctx.setCursor(false); throw new Error(data.error); }
           }
         }
         return;
@@ -410,12 +383,111 @@
     scrollBottom();
 
     abortCtrl = new AbortController();
-    const ctx = { full: "", tools: [], statusTip: "", normalDone: false, eventIndex: 0 };
+    // 有序渲染节点：{type:"text", value} | {type:"tool", tool}
+    // 流式过程增量更新（不重建 DOM、不重触发动画），工具卡片按到达顺序插入，不再固定堆在文本上方
+    const ctx = { full: "", tools: [], nodes: [], nodeEls: [], statusTip: "", normalDone: false, eventIndex: 0 };
+    bubble.innerHTML = `<div class="stream-body"><span class="dots"><span></span><span></span><span></span></span></div>`;
+    const bodyEl = bubble.firstElementChild;
+    const tipEl = document.createElement("div");
+    tipEl.className = "waiting-tip";
+    tipEl.style.display = "none";
+    bodyEl.appendChild(tipEl);
+
+    const renderNode = (n) => {
+      if (n.type === "text") {
+        const el = document.createElement("div");
+        el.className = "stream-text";
+        el.innerHTML = md(n.value);
+        return el;
+      }
+      const el = document.createElement("div");
+      el.className = "tool-list";
+      el.innerHTML = toolChip(n.tool);
+      return el;
+    };
+
+    const rebuildNodes = () => {
+      // 从 full/tools 重建顺序（结束/恢复/错误兜底用；文本在前，工具按原顺序）
+      ctx.nodes = [];
+      ctx.nodeEls = [];
+      bodyEl.innerHTML = "";
+      if (ctx.full) ctx.nodes.push({ type: "text", value: ctx.full });
+      for (const t of ctx.tools) ctx.nodes.push({ type: "tool", tool: t });
+      for (const n of ctx.nodes) {
+        const el = renderNode(n);
+        bodyEl.appendChild(el);
+        ctx.nodeEls.push(el);
+      }
+      bodyEl.appendChild(tipEl);
+      syncTip();
+    };
+
+    const syncTip = () => {
+      const show = !!ctx.statusTip && !ctx.nodes.length;
+      tipEl.style.display = show ? "" : "none";
+      tipEl.textContent = show ? ctx.statusTip : "";
+    };
+
+    ctx.addText = (delta) => {
+      ctx.statusTip = "";
+      bodyEl.querySelector(".dots")?.remove();
+      const last = ctx.nodes[ctx.nodes.length - 1];
+      if (last && last.type === "text") {
+        last.value += delta;
+        ctx.nodeEls[ctx.nodeEls.length - 1].innerHTML = md(last.value); // 仅重渲该文本节点
+      } else {
+        ctx.nodes.push({ type: "text", value: delta });
+        const el = renderNode(ctx.nodes[ctx.nodes.length - 1]);
+        bodyEl.insertBefore(el, tipEl);
+        ctx.nodeEls.push(el);
+      }
+      syncTip();
+    };
+
+    ctx.addTool = (tool) => {
+      ctx.statusTip = "";
+      bodyEl.querySelector(".dots")?.remove();
+      // bridge 对同一工具发两次事件：先带 arguments（无结果），后带 result_preview（无 arguments）→ 合并到同一节点
+      const hasResult = tool.result_preview !== undefined && tool.result_preview !== null;
+      const noArgs = !tool.arguments || !Object.keys(tool.arguments).length;
+      if (hasResult && noArgs) {
+        const last = ctx.nodes[ctx.nodes.length - 1];
+        if (last && last.type === "tool") {
+          last.tool = Object.assign({}, last.tool, tool); // 合并结果/耗时/错误态
+          ctx.nodeEls[ctx.nodeEls.length - 1].innerHTML = toolChip(last.tool);
+          return;
+        }
+      }
+      ctx.nodes.push({ type: "tool", tool });
+      const el = renderNode(ctx.nodes[ctx.nodes.length - 1]);
+      bodyEl.insertBefore(el, tipEl);
+      ctx.nodeEls.push(el);
+      syncTip();
+    };
+
+    ctx.rebuild = rebuildNodes;
+    ctx.syncTip = syncTip;
+    ctx.setCursor = (on) => bubble.classList.toggle("typing-cursor", !!on);
+    ctx.smartScroll = () => {
+      const c = chatScroll;
+      if (c.scrollHeight - c.scrollTop - c.clientHeight < 140) c.scrollTop = c.scrollHeight;
+    };
+
     const repaint = (cursor) => {
-      const toolsHtml = ctx.tools.length ? `<div class="tool-list">${ctx.tools.map(toolChip).join("")}</div>` : "";
-      const tipHtml = ctx.statusTip && !ctx.full ? `<div class="waiting-tip">${ctx.statusTip}</div>` : "";
-      bubble.innerHTML = toolsHtml + tipHtml + md(ctx.full);
-      bubble.classList.toggle("typing-cursor", !!cursor);
+      // 结束/恢复/错误时的重绘：保留流式过程的有序 nodes（工具与文本交错），不整体重建
+      if (!ctx.nodes.length) {
+        rebuildNodes(); // 无流式节点（如恢复场景）才用 full/tools 重建
+      } else {
+        const last = ctx.nodes[ctx.nodes.length - 1];
+        if (last && last.type === "text") {
+          last.value = ctx.full; // 同步完整文本（含结束/错误追加）
+          ctx.nodeEls[ctx.nodeEls.length - 1].innerHTML = md(ctx.full);
+        } else {
+          ctx.addText(ctx.full || ""); // 最后节点是工具：补一个文本节点
+        }
+        syncTip();
+      }
+      ctx.setCursor(cursor);
       scrollBottom();
     };
 
@@ -481,8 +553,7 @@
       if (st.content) {
         const last = conv.messages[conv.messages.length - 1];
         if (!(last && last.role === "assistant" && last.content === st.content)) {
-          const restoredTools = normalizeTools(st.tools);
-          conv.messages.push({ role: "assistant", content: st.content, tools: restoredTools && restoredTools.length ? restoredTools : undefined });
+          conv.messages.push({ role: "assistant", content: st.content, tools: st.tools && st.tools.length ? st.tools : undefined });
           saveConvs();
         }
         renderMessages();
@@ -492,7 +563,7 @@
       return;
     }
 
-    const ctx = { full: st.content || "", tools: normalizeTools(st.tools) || [], normalDone: false, eventIndex: st.event_count || 0 };
+    const ctx = { full: st.content || "", tools: st.tools || [], normalDone: false, eventIndex: st.event_count || 0 };
     let bubble = null;
     const repaint = (cursor) => {
       if (!bubble) return;
@@ -501,6 +572,13 @@
       bubble.classList.toggle("typing-cursor", !!cursor);
       scrollBottom();
     };
+    // streamLoop 统一走增量接口；恢复场景退化为全量渲染
+    ctx.repaint = repaint;
+    ctx.addText = (delta) => { ctx.full += delta; repaint(true); };
+    ctx.addTool = (tool) => { ctx.tools.push(tool); repaint(true); };
+    ctx.setCursor = (on) => repaint(on);
+    ctx.smartScroll = () => scrollBottom();
+    ctx.syncTip = () => {};
 
     const aiNode = msgNode("assistant", "");
     bubble = aiNode.querySelector(".msg-bubble");
@@ -613,6 +691,14 @@
       btn.textContent = "已复制 ✓";
       setTimeout(() => (btn.textContent = "复制"), 1500);
     });
+  });
+
+  // 工具调用标签：点击头部展开/折叠详情
+  messagesEl.addEventListener("click", (e) => {
+    const head = e.target.closest(".tool-head");
+    if (!head) return;
+    const chip = head.closest(".tool-chip");
+    if (chip) chip.classList.toggle("open");
   });
 
   // 主题
@@ -729,6 +815,7 @@
     }
   }
   modelSelect.addEventListener("change", () => switchModel(modelSelect.value));
+
 
   // ---------- 启动 ----------
   if (innerWidth <= 768) sidebar.classList.add("collapsed");

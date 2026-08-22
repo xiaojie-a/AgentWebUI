@@ -23,28 +23,6 @@ const MEMORY_FILE = process.env.MEMORY_FILE || './memory.json';
 // Termux 命令目录（termux-wake-lock 等都在 $PREFIX/bin 下）
 const PREFIX = process.env.PREFIX || '/data/data/com.termux/files/usr';
 
-// ============ 屏幕控制开关（云端/本地模型判断） ============
-// 读取 ~/.agent-mini/config.json：
-//  - 当前 provider 的 baseUrl 指向公网（云端模型，如 DashScope）→ 不进行屏幕控制
-//  - 指向 localhost/内网（本地模型，如 ollama）→ 正常亮屏/息屏
-//  - 也可在 config.json 顶层显式设置 "screenControl": true/false 强制覆盖（agent-mini 会忽略该字段，无副作用）
-const AGENT_CONFIG = path.join(process.env.HOME || '', '.agent-mini', 'config.json');
-
-function screenControlEnabled() {
-    try {
-        const cfg = JSON.parse(fs.readFileSync(AGENT_CONFIG, 'utf-8'));
-        if (typeof cfg.screenControl === 'boolean') return cfg.screenControl;  // 显式覆盖
-        const name = cfg.provider || 'ollama';
-        const prov = (cfg.providers || {})[name] || {};
-        const url = (prov.baseUrl || '').toLowerCase();
-        // 本地地址 → 屏幕控制；公网（云端）→ 关闭
-        const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)/i.test(url);
-        return isLocal;
-    } catch (err) {
-        return true;  // 读不到配置：默认启用（保持原行为）
-    }
-}
-
 // ============ 屏幕控制 (Termux + root) ============
 // 方案说明：
 //  - termux-brightness / termux-screen-on 依赖 Termux:API App，本机未装且命令缺失；
@@ -128,10 +106,6 @@ class ScreenController {
 
     /** 任务开始：亮屏 + 防熄屏 + 唤醒锁 */
     static turnOn() {
-        if (!this.enabled) {
-            console.log('[Screen] ⏭ 云端模型，跳过屏幕控制（不亮屏）');
-            return;
-        }
         if (!this.isTermux()) return;
 
         // 1) 亮屏（root，真实可见效果）
@@ -148,7 +122,6 @@ class ScreenController {
 
     /** 任务结束：立即息屏 + 恢复自动熄屏设置 + 释放唤醒锁 */
     static turnOff() {
-        if (!this.enabled) return;
         if (!this.isTermux()) return;
 
         // 1) 恢复系统自动熄屏设置
@@ -165,8 +138,6 @@ class ScreenController {
 }
 // root 不可用时缓存禁用（避免每个任务重复尝试）
 ScreenController.rootBroken = false;
-// 屏幕控制总开关：每次任务前由 screenControlEnabled() 按模型类型刷新
-ScreenController.enabled = true;
 
 // ============ Agent 管理器 ============
 class AgentManager {
@@ -272,10 +243,8 @@ class AgentManager {
         }
         session.lock = true;
 
-        // 根据模型类型刷新屏幕控制开关（云端模型不亮屏，本地模型正常控制）
-        ScreenController.enabled = screenControlEnabled();
         // 点亮屏幕
-        ScreenController.turnOn();
+        ScreenController.turnOn(200);
 
         console.log(`[Agent] 🚀 启动任务 ${task.id}, 消息: ${message.slice(0, 50)}...`);
 

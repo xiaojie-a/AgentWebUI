@@ -24,12 +24,45 @@ set -u
 cd "$(dirname "$0")"
 
 # ---------- 可配置项（环境变量覆盖）----------
-PY="${AGENT_MINI_PYTHON:-python3}"
+# ---------- 自动检测 Python 环境 ----------
+# 检查 pipx 安装的 agent-mini
+if [ -z "${AGENT_MINI_PYTHON:-}" ]; then
+    # 查找 pipx 虚拟环境
+    PIPX_VENV="/home/xem/.local/share/pipx/venvs/agent-mini"
+    if [ -f "$PIPX_VENV/bin/python" ] && "$PIPX_VENV/bin/python" -c "import agent_mini" 2>/dev/null; then
+        PY="$PIPX_VENV/bin/python"
+        echo "✅ 使用 pipx 虚拟环境: $PY"
+        # 设置 PYTHONPATH 为 site-packages
+        SITE_PKG=$($PY -c "import site; print(site.getsitepackages()[0])")
+        export PYTHONPATH="$SITE_PKG"
+    elif python3 -c "import agent_mini" 2>/dev/null; then
+        PY="python3"
+        echo "✅ 使用系统 Python"
+    else
+        # 尝试用户 site-packages
+        USER_SITE=$(python3 -c "import site; print(site.getusersitepackages())" 2>/dev/null || echo "")
+        if [ -n "$USER_SITE" ] && python3 -c "import sys; sys.path.insert(0, '$USER_SITE'); import agent_mini" 2>/dev/null; then
+            export PYTHONPATH="$USER_SITE"
+            PY="python3"
+            echo "✅ 使用用户 site-packages: $USER_SITE"
+        else
+            PY="python3"
+            echo "⚠️  警告: 未找到 agent_mini"
+        fi
+    fi
+else
+    PY="$AGENT_MINI_PYTHON"
+fi
+
+# 导出供子进程使用
+
 NODE="${NODE_BIN:-node}"
 BRIDGE_PORT="${BRIDGE_PORT:-8765}"
 WEB_PORT="${PORT:-3000}"
 
 # webui 后端连接桥接服务的地址
+export PYTHONPATH
+export AGENT_MINI_PYTHON="$PY"
 export AGENT_BRIDGE="http://127.0.0.1:${BRIDGE_PORT}"
 export BRIDGE_PORT
 export PORT="$WEB_PORT"
