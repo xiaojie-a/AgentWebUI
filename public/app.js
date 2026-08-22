@@ -34,7 +34,8 @@
     const codeBlocks = [];
     src = src.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
       codeBlocks.push({ lang, code: code.replace(/\n$/, "") });
-      return ` CODE${codeBlocks.length - 1} `;
+      // 用私用区哨兵字符占位，避免被后续 markdown 列表/段落处理吃掉前后空格导致渲染失败
+      return `\uE000${codeBlocks.length - 1}\uE001`;
     });
     let html = esc(src);
     html = html.replace(/^### (.*)$/gm, "<h3>$1</h3>")
@@ -70,10 +71,13 @@
       if (/^<(h\d|ul|ol|table|blockquote|pre)/.test(p)) return p;
       return `<p>${p.replace(/\n/g, "<br>")}</p>`;
     }).join("");
-    html = html.replace(/ CODE(\d+) /g, (_, i) => {
+    // 用哨兵字符还原代码块（不依赖前后空格，兼容列表/段落处理后的任意上下文）
+    html = html.replace(/\uE000(\d+)\uE001/g, (_, i) => {
       const { lang, code } = codeBlocks[+i];
       return `<pre><div class="code-header"><span>${lang || "code"}</span><button class="copy-btn" data-code="${esc(code)}">复制</button></div><code>${esc(code)}</code></pre>`;
     });
+    // 清理 <p><pre>…</pre></p> 这类非法嵌套，让代码块成为独立块级元素
+    html = html.replace(/<p>(<pre>[\s\S]*?<\/pre>)<\/p>/g, "$1");
     return html;
   }
 
