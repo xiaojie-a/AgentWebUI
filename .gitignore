@@ -16,8 +16,11 @@ node_modules/
 .DS_Store
 Thumbs.db
 
-# 覆盖前备份
-*.bak_orig
-
-# 同步前备份
-*.bak_sync0821
+# 覆盖前备份（所有备份文件一律不入库，防止 termux ff-only pull 被同名 untracked 阻塞）
+*.bak
+*.bak_*
+*.bak-*
+*.orig
+*.rej
+.backup_*/
+.old/
