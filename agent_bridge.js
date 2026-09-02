@@ -578,9 +578,13 @@ app.get('/info', (req, res) => {
 });
 
 // ============ 列出可用模型 ============
-// 返回配置文件里已配置的所有 provider 及其模型，供前端下拉框填充。
-// 每次 agent 任务都是新子进程读配置，所以前端切换后下条消息立即生效。
-app.get('/models', (req, res) => {
+// 返回所有可选模型供前端下拉框填充：
+//   1) config 里已配置的 providers（local/云端等，始终列出）
+//   2) **自动检测 ollama 本地模型**（GET {baseUrl}/api/tags）—— 本机 ollama 里
+//      pull 进来的模型（qwen3:1.7b / orca-mini / granite 等）全部加入 ollama 组，
+//      无需每次手动写 config。cloud 型模型排到列表末尾。
+// 切换仍走 POST /config（provider=ollama + 任意模型名即写入生效）。
+app.get('/models', async (req, res) => {
     try {
         const config = readConfig();
         if (!config) {
@@ -588,16 +592,49 @@ app.get('/models', (req, res) => {
         }
         const active = config.provider || 'ollama';
         const providers = config.providers || {};
-        const models = Object.keys(providers).map((name) => {
+        const seen = new Set();
+        const models = [];
+        const push = (provider, model, isActive) => {
+            const key = provider + '||' + model;
+            if (!model || seen.has(key)) return;
+            seen.add(key);
+            models.push({ provider, model, active: !!isActive });
+        };
+
+        // 1) 已配置 providers（含 local/云端 API）
+        for (const name of Object.keys(providers)) {
             const cfg = providers[name] || {};
-            return {
-                provider: name,
-                model: cfg.model || '',
-                // 标注是否为当前生效的 provider
-                active: name === active,
-            };
-        });
-        res.json({ active, models });
+            if (cfg && cfg.model) push(name, cfg.model, name === active);
+        }
+
+        // 2) 自动检测 ollama 本地模型
+        const ollamaCfg = providers.ollama || {};
+        const ollamaUrl = String(ollamaCfg.baseUrl || 'http://127.0.0.1:11434').replace(/\/+$/, '');
+        const activeModel = (providers.ollama && providers.ollama.model) || '';
+        let localCount = 0;
+        try {
+            const r = await fetch(ollamaUrl + '/api/tags', { signal: AbortSignal.timeout(3000) });
+            if (r.ok) {
+                const tags = await r.json();
+                const list = Array.isArray(tags && tags.models) ? tags.models : [];
+                const sorted = list.slice().sort((a, b) => {
+                    const ac = String(a && a.name || '').toLowerCase().includes('cloud') ? 1 : 0;
+                    const bc = String(b && b.name || '').toLowerCase().includes('cloud') ? 1 : 0;
+                    return ac - bc;
+                });
+                for (const m of sorted) {
+                    const name = String((m && m.name) || '').trim();
+                    if (!name) continue;
+                    localCount++;
+                    push('ollama', name, active === 'ollama' && name === activeModel);
+                }
+            }
+        } catch (e) { /* ollama 不可达：忽略，仍返回已配置项 */ }
+
+        // 3) 兜底：ollama 探测失败时至少保留当前配置项
+        if (localCount === 0) push('ollama', activeModel || 'qwen3:8b', active === 'ollama');
+
+        res.json({ active, models, local_models: localCount });
     } catch (err) {
         res.json({ active: 'ollama', models: [], error: err.message });
     }
