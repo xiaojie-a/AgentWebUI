@@ -884,3 +884,26 @@
   tick();
   setInterval(tick, 3000);
 })();
+
+// ============ 设置弹窗：停止所有任务按钮 ============
+(function () {
+  var btn = document.getElementById("stopAllBtn");
+  if (!btn) return;
+  btn.addEventListener("click", function () {
+    if (!window.confirm("确定停止当前所有后台 agent 任务？正在进行的操作会被中断。")) return;
+    btn.disabled = true;
+    btn.textContent = "⏹ 正在停止…";
+    fetch("/api/stop-all", { method: "POST", cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        var n = (d && d.count != null) ? d.count : 0;
+        btn.textContent = n > 0 ? ("✅ 已停止 " + n + " 个任务") : "✅ 当前无运行中任务";
+        setTimeout(function () { btn.disabled = false; btn.textContent = "⏹ 停止所有任务"; }, 2500);
+      })
+      .catch(function () {
+        btn.disabled = false;
+        btn.textContent = "❌ 停止失败，稍后重试";
+        setTimeout(function () { btn.textContent = "⏹ 停止所有任务"; }, 2500);
+      });
+  });
+})();

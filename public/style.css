@@ -426,3 +426,30 @@ body {
 }
 .sys-status b { font-weight: 600; font-variant-numeric: tabular-nums; }
 @media (max-width: 720px) { .sys-status { display: none; } }
+
+/* ============ 设置弹窗：停止所有任务 ============ */
+.modal-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border, rgba(0,0,0,.08));
+}
+.stop-all-btn {
+  padding: 9px 14px;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background: #e5484d;
+  cursor: pointer;
+  transition: opacity .15s;
+}
+.stop-all-btn:hover { opacity: .88; }
+.stop-all-btn:disabled { opacity: .6; cursor: default; }
+.stop-all-hint {
+  font-size: 11px;
+  opacity: .6;
+  line-height: 1.4;
+}

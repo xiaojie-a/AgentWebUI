@@ -252,6 +252,32 @@ class AgentManager {
     }
 
     /**
+     * 停止所有正在运行的任务（SIGINT + 3 秒后未退则 SIGKILL，确保彻底停止）
+     */
+    stopAllTasks() {
+        const stopped = [];
+        for (const [taskId, task] of this.tasks) {
+            if (task.status === 'running') {
+                this.cancelTask(taskId);
+                stopped.push(taskId);
+            }
+        }
+        // 兜底：SIGINT 3 秒内仍 running 则 SIGKILL，防止卡死的 python/推理子进程赖着不走
+        for (const taskId of stopped) {
+            const task = this.tasks.get(taskId);
+            if (!task || !task.worker) continue;
+            setTimeout(() => {
+                const t = this.tasks.get(taskId);
+                if (t && t.status === 'running' && t.worker && !t.worker.killed) {
+                    console.log(`[Agent] 任务 ${taskId} 停止超时，强制 SIGKILL`);
+                    t.worker.kill('SIGKILL');
+                }
+            }, 3000);
+        }
+        return stopped;
+    }
+
+    /**
      * 删除会话
      */
     deleteSession(sessionId) {
@@ -733,6 +759,12 @@ app.post('/cancel', (req, res) => {
     }
 
     res.status(400).json({ error: 'task_id or session_id required' });
+});
+
+// ============ 停止所有任务（前端“停止所有任务”按钮） ============
+app.post('/stop-all', (req, res) => {
+    const stopped = manager.stopAllTasks();
+    res.json({ ok: true, stopped, count: stopped.length });
 });
 
 // ============ 删除会话 ============

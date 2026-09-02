@@ -401,6 +401,19 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { available: false, error: "monitor.json 未生成（monitor_tool 未运行）" });
     }
   }
+  if (p === "/api/stop-all" && req.method === "POST") {
+    // 停止所有 agent 任务（前端“停止所有任务”按钮）
+    try {
+      const r = await fetch(`${BRIDGE}/stop-all`, {
+        method: "POST",
+        signal: AbortSignal.timeout(8000),
+      });
+      const data = await r.json();
+      return sendJson(res, 200, { ...data, bridge: true });
+    } catch {
+      return sendJson(res, 200, { ok: false, error: "桥接服务不可达", bridge: false });
+    }
+  }
   if (p === "/api/config" && req.method === "GET") {
     try {
       const r = await fetch(`${BRIDGE}/info`, { signal: AbortSignal.timeout(2000) });
