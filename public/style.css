@@ -425,7 +425,12 @@ body {
   gap: 3px;
 }
 .sys-status b { font-weight: 600; font-variant-numeric: tabular-nums; }
-@media (max-width: 720px) { .sys-status { display: none; } }
+/* 小屏（手机）：不隐藏，改紧凑显示；隐藏 "CPU" 文字标签省空间，标题允许截断 */
+@media (max-width: 720px) {
+  .sys-status { gap: 6px; margin-left: 6px; padding: 3px 8px; font-size: 10px; }
+  .sys-status .sys-label { display: none; }
+  .topbar-title { max-width: 26vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
 
 /* ============ 设置弹窗：停止所有任务 ============ */
 .modal-actions {
