@@ -58,12 +58,32 @@ status_watchdog() {
     && echo "bridge:  OK" || echo "bridge:  DOWN"
   curl -s -m 2 "http://127.0.0.1:$WEB_PORT/api/health" >/dev/null 2>&1 \
     && echo "webui:   OK" || echo "webui:   DOWN"
+  if [ -f ".pids/monitor.pid" ] && kill -0 "$(cat .pids/monitor.pid)" 2>/dev/null; then
+    echo "monitor: OK"
+  else
+    echo "monitor: DOWN"
+  fi
 }
 
 # 单服务守护：端口不通则杀掉旧进程并拉起
 ensure() {
   local name="$1" port="$2" cmd="$3" pidfile="$4" logfile="$5"
   if curl -s -m 2 "http://127.0.0.1:$port" >/dev/null 2>&1; then
+    return
+  fi
+  local oldpid=""
+  [ -f "$pidfile" ] && oldpid="$(cat "$pidfile")"
+  [ -n "$oldpid" ] && kill "$oldpid" 2>/dev/null
+  log "[$name] 失联，正在重启..."
+  nohup $cmd >>"$logfile" 2>&1 </dev/null &
+  echo $! > "$pidfile"
+  log "[$name] 已重启 (pid $(cat "$pidfile"))"
+}
+
+# 进程守护：非端口类服务（如 monitor_tool），pidfile + kill -0 探活
+ensure_proc() {
+  local name="$1" cmd="$2" pidfile="$3" logfile="$4"
+  if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
     return
   fi
   local oldpid=""
@@ -101,6 +121,8 @@ loop() {
   while true; do
     ensure "bridge" "$BRIDGE_PORT" "$NODE agent_bridge.js" ".pids/bridge.pid" "logs/bridge.log"
     ensure "webui"  "$WEB_PORT"    "$NODE server.js"       ".pids/web.pid"    "logs/web.log"
+    # 本机监控（电量/CPU）：写 monitor.json 供 /api/monitor 读取
+    ensure_proc "monitor" "python3 monitor_tool.py" ".pids/monitor.pid" "logs/monitor.log"
     if command -v ollama >/dev/null 2>&1; then
       ensure "ollama" "11434" "ollama serve" ".pids/ollama.pid" "logs/ollama.log"
     fi

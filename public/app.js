@@ -834,3 +834,53 @@
     if (!document.hidden) recoverActiveTask();
   });
 })();
+
+// ============ 本机实时监控（电量/CPU/内存，每 3 秒刷新） ============
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var elBatt = $("battPct"), elCpu = $("cpuPct"), elStatus = $("sysStatus");
+  if (!elBatt && !elCpu) return; // 页面无监控元素（如纯 API 场景）则跳过
+
+  function setText(el, txt, cls) {
+    if (!el) return;
+    el.textContent = txt;
+    if (cls) { el.className = cls; } else if (elBatt) { /* 保留默认 */ }
+  }
+  function apply(data) {
+    var ok = data && data.available !== false;
+    if (!ok) {
+      setText(elBatt, "--%");
+      setText(elCpu, "--%");
+      if (elStatus) elStatus.title = "监控未就绪：monitor_tool 未运行";
+      return;
+    }
+    var b = data.battery || {}, c = data.cpu || {};
+    var pct = (b.percent == null) ? "--%" : b.percent + "%";
+    var usage = (c.usage == null) ? "--%" : c.usage + "%";
+    // 低电量（≤20%）标红提醒
+    if (b.percent != null && b.percent <= 20) {
+      setText(elBatt, pct);
+      if (elBatt) elBatt.style.color = "#e5484d";
+    } else {
+      setText(elBatt, pct);
+      if (elBatt) elBatt.style.color = "";
+    }
+    setText(elCpu, usage);
+    if (elStatus) {
+      var status = b.status ? (b.status === "Charging" ? "充电中" : b.status === "Full" ? "已充满" : b.status === "Discharging" ? "" : b.status) : "";
+      var tip = "电量 " + pct + (status ? "（" + status + "）" : "");
+      if (b.temp_c != null) tip += " · 电池 " + b.temp_c + "℃";
+      tip += " · CPU " + usage;
+      if (data.mem && data.mem.usage != null) tip += " · 内存 " + data.mem.usage + "%";
+      elStatus.title = tip + "（每 3 秒刷新）";
+    }
+  }
+  function tick() {
+    fetch("/api/monitor", { cache: "no-store" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(apply)
+      .catch(function () { apply(null); });
+  }
+  tick();
+  setInterval(tick, 3000);
+})();

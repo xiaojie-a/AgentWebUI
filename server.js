@@ -391,6 +391,16 @@ const server = http.createServer(async (req, res) => {
   if (p === "/api/health") {
     return sendJson(res, 200, { ok: true, bridge: await bridgeOk() });
   }
+  if (p === "/api/monitor" && req.method === "GET") {
+    // 本机实时监控（电量/CPU/内存）：读 monitor_tool.py 周期写入的 monitor.json
+    const mp = path.join(__dirname, "monitor.json");
+    try {
+      const raw = fs.readFileSync(mp, "utf8");
+      return sendJson(res, 200, { ...JSON.parse(raw), available: true });
+    } catch {
+      return sendJson(res, 200, { available: false, error: "monitor.json 未生成（monitor_tool 未运行）" });
+    }
+  }
   if (p === "/api/config" && req.method === "GET") {
     try {
       const r = await fetch(`${BRIDGE}/info`, { signal: AbortSignal.timeout(2000) });

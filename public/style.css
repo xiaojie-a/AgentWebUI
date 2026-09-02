@@ -403,3 +403,26 @@ body {
   .chat-scroll { padding: 16px; }
   .composer-wrap { padding: 8px 12px 14px; }
 }
+
+/* ============ 系统状态（电量/CPU 实时监控） ============ */
+.sys-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: 10px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--text, #333);
+  background: var(--hover, rgba(0,0,0,.05));
+  user-select: none;
+}
+.sys-status .sys-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.sys-status b { font-weight: 600; font-variant-numeric: tabular-nums; }
+@media (max-width: 720px) { .sys-status { display: none; } }

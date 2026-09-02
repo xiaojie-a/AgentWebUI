@@ -59,6 +59,10 @@
           <select id="modelSelect" class="model-select" title="切换模型"></select>
           <svg class="model-caret" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
         </div>
+        <div class="sys-status" id="sysStatus" title="本机实时状态（每 3 秒刷新）">
+          <span class="sys-item">🔋 <b id="battPct">--%</b></span>
+          <span class="sys-item">CPU <b id="cpuPct">--%</b></span>
+        </div>
       </header>
 
       <div class="chat-scroll" id="chatScroll">
