@@ -1,5 +1,6 @@
 /* ========== 主题变量 ========== */
 :root {
+  color-scheme: light;
   --bg: #f6f7fb;
   --bg-glass: rgba(255, 255, 255, 0.72);
   --sidebar-bg: rgba(255, 255, 255, 0.6);
@@ -19,6 +20,7 @@
 }
 
 [data-theme="dark"] {
+  color-scheme: dark;
   --bg: #0e0f16;
   --bg-glass: rgba(22, 24, 36, 0.72);
   --sidebar-bg: rgba(18, 20, 30, 0.6);
@@ -290,6 +292,20 @@ body {
 .tool-result {
   flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; opacity: 0.9;
 }
+/* 工具卡完整展示：参数块 / 结果块 / 耗时 / 错误态 */
+.tool-detail { padding-top: 2px; }
+.tool-block { flex-basis: 100%; margin-top: 5px; min-width: 0; }
+.tool-block pre {
+  margin: 3px 0 0; padding: 7px 9px; border-radius: 8px;
+  background: rgba(0, 0, 0, 0.16); border: 1px solid var(--border);
+  font-family: "JetBrains Mono", Consolas, monospace; font-size: 11.5px;
+  line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+  color: var(--text-2);
+  max-height: 260px; overflow: auto;
+}
+.tool-block .tool-result-error { color: #ff5c7a; }
+.tool-lbl.lbl-err { background: #a33; }
+.tool-dur { margin-top: 5px; font-size: 11px; color: var(--text-2); opacity: 0.75; text-align: right; }
 
 /* 模型长时间无输出的等待提示（Ollama 超时后 agent 内部重试期间显示） */
 .waiting-tip {
@@ -458,3 +474,152 @@ body {
   opacity: .6;
   line-height: 1.4;
 }
+
+/* 设置弹窗：后端引擎复选框 */
+.settings-row { padding: 12px 20px; border-top: 1px solid var(--border, rgba(128,128,128,.15)); }
+.settings-check { display: flex; gap: 8px; align-items: center; cursor: pointer; font-size: 13px; }
+.settings-check input { accent-color: var(--accent, #6c8cff); cursor: pointer; width: 15px; height: 15px; }
+
+/* ========== 主题一致性修复（深色/浅色切换下字体跟随） ========== */
+/* 原生下拉弹层：color-scheme 已在 :root / dark 上设置，
+   option 列表按 select 的 color-scheme 渲染；这里再钉一次文字与底色，
+   保证深色主题下弹层是深底浅字、浅色主题下是浅底深字 */
+.model-select {
+  background: transparent;
+  color: var(--text);
+  -webkit-text-fill-color: var(--text);
+}
+.model-select option {
+  background: var(--bg-glass);
+  color: var(--text);
+}
+[data-theme="dark"] .model-select option {
+  background: #1a1c2a;
+  color: #eceef5;
+}
+
+/* 助手消息气泡显式文字色，斩断继承链，保证主题切换全量生效
+   （仅 assistant 气泡——用户气泡是渐变深底白字，code 应保持白字继承） */
+.msg.assistant .msg-bubble { color: var(--text); }
+.msg.assistant .msg-bubble code { color: var(--text); }
+.msg.assistant .msg-bubble pre code { color: var(--text); }
+
+/* 工具调用气泡（tool-chip）：文字与背景全部钉到主题变量 */
+.tool-chip { color: var(--text-2); background: var(--code-bg); }
+.tool-chip .tool-name { color: var(--text); }
+.tool-chip .tool-summary { color: var(--text-2); }
+.tool-chip .tool-time { color: var(--text-2); }
+.tool-chip .tool-toggle { color: var(--text-2); }
+/* “参数 xx / 执行结果”小标签（.tool-block 内，无彩色底）：文字与底色随主题
+   浅色主题=灰字浅底，深色主题=浅字暗底，跟随切换而变化 */
+.tool-chip .tool-block .tool-lbl {
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.06);
+}
+[data-theme="dark"] .tool-chip .tool-block .tool-lbl {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.10);
+}
+/* 错误标签保持警示红底白字（两主题一致，不参与变色） */
+.tool-chip .tool-block .tool-lbl.lbl-err,
+.tool-lbl.lbl-err { color: #fff; background: #a33; }
+/* 旧式彩色小标签（.tool-line 内第 1/2/3 行蓝/绿/黄底）保持白字 */
+.tool-chip .tool-lbl { color: #fff; }
+.tool-chip .tool-result { color: var(--text-2); }
+.tool-chip .tool-block pre { color: var(--text-2); }
+.tool-chip .tool-dur { color: var(--text-2); }
+/* 代码底色：浅色加淡淡黑、深色加淡淡白，跟随主题而不是固定黑 */
+.tool-chip .tool-block pre { background: rgba(0, 0, 0, 0.05); }
+[data-theme="dark"] .tool-chip .tool-block pre { background: rgba(255, 255, 255, 0.07); }
+/* 旧式明细行 .tool-line 残留元素同样钉变量 */
+.tool-cmd { color: var(--text); }
+.tool-reason { color: var(--text); }
+
+/* 深色主题下让等待提示、输入框等次要文字也走变量 */
+.waiting-tip { color: var(--text-2); }
+
+/* 阶段状态行（模型思考中/输出中/执行命令中）：轻呼吸动画，区别于错误/提示框 */
+@keyframes tipPulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+.waiting-tip { animation: tipPulse 1.6s ease-in-out infinite; }
+
+/* ============ 深度思考卡片（复用 .tool-chip 折叠体系） ============ */
+/* 与工具卡片同款交互：思考中默认展开，完毕后自动折叠，点击头部可展开阅读 */
+.think-chip {
+  border-left: 3px solid #8b6cf6;
+}
+.think-chip .tool-name {
+  color: var(--text);
+  font-family: inherit;               /* 中文名称不走等宽字体 */
+}
+.think-chip.thinking .tool-summary::before {
+  content: "";
+  display: inline-block;
+  width: 7px; height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: #8b6cf6;
+  vertical-align: baseline;
+  animation: thinkPulse 1.2s ease-in-out infinite;
+}
+.think-chip .tool-detail pre {
+  white-space: pre-wrap;
+  color: var(--text-2);
+  line-height: 1.6;
+}
+@keyframes thinkPulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+/* ============ 上下文用量圆环 + 弹窗 ============ */
+.ctx-ring-btn {
+  flex-shrink: 0;
+  width: 30px; height: 30px;
+  margin: 0 3px 0 2px;
+  padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: none; border: none; cursor: pointer;
+  color: var(--text-2);
+  border-radius: 50%;
+  transition: background 0.2s ease;
+}
+.ctx-ring-btn:hover { background: rgba(127, 127, 127, 0.12); }
+.ctx-ring-bg { fill: none; stroke: rgba(127, 127, 127, 0.22); stroke-width: 3; }
+.ctx-ring-fg {
+  fill: none; stroke: #8b6cf6; stroke-width: 3;
+  stroke-linecap: round;
+  transform: rotate(-90deg); transform-origin: 50% 50%;
+  transition: stroke-dashoffset 0.35s ease, stroke 0.35s ease;
+}
+.ctx-ring-fg.warn  { stroke: #e5a52d; }
+.ctx-ring-fg.danger{ stroke: #e5484d; }
+
+.ctx-row {
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 14px; padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.ctx-row .ctx-lbl { flex-shrink: 0; font-size: 13px; color: var(--text); }
+.ctx-row input[type="range"] { flex: 1; min-width: 0; accent-color: #8b6cf6; }
+.ctx-row .ctx-val {
+  min-width: 4.2em; text-align: right;
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 13px; color: var(--text);
+}
+.ctx-row .ctx-unit { color: var(--text-2); font-size: 12px; }
+.ctx-note { color: var(--text-2); font-size: 12px; line-height: 1.6; margin: 8px 0 0; }
+.ctx-usage-bar {
+  height: 8px; border-radius: 99px; margin: 10px 0 4px;
+  background: rgba(127, 127, 127, 0.18); overflow: hidden;
+}
+.ctx-usage-bar > i {
+  display: block; height: 100%; width: 0%;
+  border-radius: 99px;
+  background: linear-gradient(90deg, #7c6cff, #ff6ec7);
+  transition: width 0.35s ease;
+}
+.ctx-usage-bar > i.warn { background: #e5a52d; }
+.ctx-usage-bar > i.danger { background: #e5484d; }

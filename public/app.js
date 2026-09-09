@@ -7,7 +7,11 @@
   const sidebar = $("sidebar"), sidebarOverlay = $("sidebarOverlay"), convList = $("convList"), messagesEl = $("messages"),
     welcomeEl = $("welcome"), chatScroll = $("chatScroll"), input = $("input"),
     sendBtn = $("sendBtn"), topbarTitle = $("topbarTitle"), modelBadge = $("modelBadge"),
-    settingsModal = $("settingsModal");
+    assistantName = $("assistantName"),
+    settingsModal = $("settingsModal"),
+    ctxRing = $("ctxRing"), ctxRingArc = $("ctxRingArc"),
+    ctxModal = $("ctxModal"), ctxDetail = $("ctxDetail"),
+    ctxMaxRange = $("ctxMaxRange"), ctxMaxVal = $("ctxMaxVal"), closeCtx = $("closeCtx");
 
   // ---------- 状态 ----------
   let conversations = loadConvs();
@@ -15,6 +19,16 @@
   if (currentId && !conversations.find((c) => c.id === currentId)) currentId = null;
   let streaming = false;
   let abortCtrl = null;
+  // 正在流式输出中的"任务气泡"（运行中任务在 send()/recoverActiveTask() 里建的 DOM）。
+  // renderMessages 会清空消息区，切走再切回时靠它把还在跑的气泡重新挂回，
+  // 避免"模型思考中切历史/刷新后整个输出消失"。
+  let liveView = null;
+
+  // 模型工作阶段状态文案（发送后 → 思考/输出/执行工具 动态反馈）
+  const TIP_WAIT = "⏳ 等待模型响应……";
+  const TIP_THINK = "🧠 模型正在思考……";
+  const TIP_OUTPUT = "✍️ 模型正在输出……";
+  const TIP_EXEC = "⚙️ 执行命令中……";
 
   // ---------- 工具 ----------
   function loadConvs() {
@@ -28,6 +42,96 @@
     return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
   function currentConv() { return conversations.find((c) => c.id === currentId) || null; }
+
+  // ---------- 上下文用量（发送键旁圆环 + 详情弹窗） ----------
+  let ctxMax = 8192;          // 上下文上限（默认 8192；读 config numCtx 覆盖）
+  let cfgProvider = "ollama";
+  let cfgModel = "";
+  const CTX_RING_C = 2 * Math.PI * 15.5;   // 圆环周长（r=15.5）
+
+  function estimateTokens(t) {
+    if (!t) return 0;
+    const s = String(t);
+    const cjk = (s.match(/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/g) || []).length;
+    return Math.max(1, Math.round(cjk * 0.7 + (s.length - cjk) / 4)); // 粗略估算
+  }
+  function convUsedTokens(conv) {
+    let n = 0;
+    for (const m of (conv && conv.messages) || []) n += estimateTokens(m && m.content);
+    return n;
+  }
+  function updateCtxRing() {
+    if (!ctxRing || !ctxRingArc) return;
+    const used = convUsedTokens(currentConv());
+    const pct = ctxMax > 0 ? used / ctxMax : 0;
+    const p = Math.min(1, Math.max(0, pct));
+    ctxRingArc.style.strokeDasharray = String(CTX_RING_C);
+    ctxRingArc.style.strokeDashoffset = String(CTX_RING_C * (1 - p));
+    ctxRingArc.classList.toggle("warn", p > 0.8 && p <= 0.95);
+    ctxRingArc.classList.toggle("danger", p > 0.95);
+    ctxRing.title = `上下文 ${used.toLocaleString()} / ${ctxMax.toLocaleString()} tokens（约 ${Math.round(p * 100)}%）`;
+  }
+  async function loadCtxConfig() {
+    try {
+      const cfg = await (await fetch("/api/config")).json();
+      if (cfg && cfg.provider) cfgProvider = cfg.provider;
+      if (cfg && cfg.model) cfgModel = cfg.model;
+      const n = cfg && parseInt(cfg.numCtx, 10);
+      if (n && n > 0 && ctxMaxRange) {
+        ctxMax = n;
+        ctxMaxRange.value = n;
+        ctxMaxVal.textContent = n.toLocaleString();
+      }
+    } catch { /* 后端未就绪：保留默认值 */ }
+    updateCtxRing();
+  }
+  function openCtxModal() {
+    if (!ctxModal) return;
+    const used = convUsedTokens(currentConv());
+    const pct = ctxMax > 0 ? used / ctxMax : 0;
+    const conv = currentConv();
+    const msgCount = conv ? conv.messages.length : 0;
+    const charLen = conv ? conv.messages.reduce((a, m) => a + String((m && m.content) || "").length, 0) : 0;
+    ctxDetail.innerHTML =
+      `<div class="info-row"><span>已用</span><b>${used.toLocaleString()} tokens</b></div>` +
+      `<div class="info-row"><span>占用率</span><b>${Math.round(pct * 100)}%</b></div>` +
+      `<div class="ctx-usage-bar"><i class="${pct > 0.8 ? "warn" : ""}${pct > 0.95 ? " danger" : ""}" style="width:${Math.min(100, pct * 100)}%"></i></div>` +
+      `<div class="info-row"><span>会话消息</span><b>${msgCount} 条</b></div>` +
+      `<div class="info-row"><span>文本长度</span><b>${charLen.toLocaleString()} 字符</b></div>` +
+      `<div class="info-row"><span>当前模型</span><b>${esc(cfgProvider)} · ${esc(cfgModel || "?")}</b></div>`;
+    ctxMaxRange.value = ctxMax;
+    ctxMaxVal.textContent = ctxMax.toLocaleString();
+    ctxModal.hidden = false;
+  }
+  ctxRing && (ctxRing.onclick = openCtxModal);
+  closeCtx && (closeCtx.onclick = () => { if (ctxModal) ctxModal.hidden = true; });
+  ctxModal && (ctxModal.onclick = (e) => { if (e.target === ctxModal) ctxModal.hidden = true; });
+  if (ctxMaxRange) {
+    ctxMaxRange.addEventListener("input", () => {
+      const v = Number(ctxMaxRange.value);
+      ctxMaxVal.textContent = v.toLocaleString();
+      // 即时预览：按新上限刷新圆环
+      const used = convUsedTokens(currentConv());
+      const p = v > 0 ? used / v : 0;
+      ctxRingArc.style.strokeDashoffset = String(CTX_RING_C * (1 - Math.min(1, Math.max(0, p))));
+    });
+    ctxMaxRange.addEventListener("change", async () => {
+      const v = Number(ctxMaxRange.value);
+      ctxMax = v;
+      ctxMaxVal.textContent = v.toLocaleString();
+      try {
+        const r = await fetch("/api/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ provider: cfgProvider, numCtx: v }),
+        });
+        const d = await r.json();
+        if (!r.ok || !d.ok) console.warn("上下文上限保存失败:", d && d.error);
+        else console.log(`[Ctx] 上下文上限 -> ${v}`);
+      } catch (e) { console.warn("上下文上限保存失败:", e.message); }
+      updateCtxRing();
+    });
+  }
 
   // ---------- 轻量 Markdown 渲染 ----------
   function md(src) {
@@ -134,35 +238,77 @@
     return "调用 " + (t.name || "工具") + " 执行操作";
   }
 
-  // 工具调用事件 -> 可折叠标签：默认折叠为灰色摘要行（action=xx 参数=yy ›），点击箭头展开命令/原因/结果
+  // 工具卡片：摘要行（工具名+参数速览）+ 可展开详情（完整参数 / 执行结果 / 耗时）
+  // 规则：工具执行中（尚无 result）默认展开；返回结果后收起（由 renderNode/addTool 控制 open）
+  function toolDuration(ms) {
+    if (ms === undefined || ms === null || isNaN(ms)) return "";
+    return ms < 1000 ? Math.round(ms) + "ms" : (ms / 1000).toFixed(2) + "s";
+  }
+
+  function toolArgText(v) {
+    if (typeof v === "string") return v;
+    try { return JSON.stringify(v, null, 2); } catch { return String(v); }
+  }
+
   function toolChip(t) {
-    const preview = (t.result_preview || "").replace(/\s+/g, " ").slice(0, 80);
-    const cmd = extractCommand(t);
-    const reason = describeReason(t);
-    // 摘要：action=xxx 其他 key=value
     const args = t.arguments || {};
+    const hasResult = t.result_preview !== undefined && t.result_preview !== null;
+    const rp = hasResult ? String(t.result_preview) : "";
+    const isErr = !!(t.is_error || /^(error|exception|执行失败|退出码)/i.test(rp.trim()));
+
+    // 折叠态摘要：参数 key=value 速览
     const parts = [];
-    if (args.action) parts.push(`action=${args.action}`);
     for (const [k, v] of Object.entries(args)) {
-      if (k === "action" || v === undefined || v === null || v === "") continue;
-      const s = String(v);
-      parts.push(`${k}=${s.length > 28 ? s.slice(0, 28) + "…" : s}`);
+      if (v === undefined || v === null || v === "") continue;
+      const flat = String(toolArgText(v)).replace(/\s+/g, " ").trim();
+      parts.push(`${k}=${flat.slice(0, 40)}${flat.length > 40 ? "…" : ""}`);
     }
-    const summary = parts.join(" ") || preview || "(无参数)";
-    const detail = [
-      cmd ? `<div class="tool-line"><span class="tool-lbl">命令</span><code class="tool-cmd">${esc(cmd).slice(0, 160)}</code></div>` : "",
-      reason ? `<div class="tool-line"><span class="tool-lbl">原因</span><span class="tool-reason">${esc(reason)}</span></div>` : "",
-      preview ? `<div class="tool-line"><span class="tool-lbl">结果</span><span class="tool-result">${esc(preview)}</span></div>` : "",
-    ].join("");
-    return `<div class="tool-chip${t.is_error ? " error" : ""}" title="${esc(JSON.stringify(args))}">
+    const summary = parts.join(" ") || (hasResult ? rp.replace(/\s+/g, " ").slice(0, 40) : "(执行中…)");
+
+    // 展开态：完整参数（逐参数一块）
+    const paramHtml = Object.entries(args)
+      .filter(([, v]) => v !== undefined && v !== null)
+      .map(([k, v]) =>
+        `<div class="tool-block"><span class="tool-lbl">参数 ${esc(k)}</span><pre>${esc(toolArgText(v))}</pre></div>`
+      ).join("");
+
+    // 展开态：执行结果（完整、可滚动）
+    const timeText = toolDuration(t.duration);
+    const resultHtml = hasResult
+      ? `<div class="tool-block"><span class="tool-lbl${isErr ? " lbl-err" : ""}">${isErr ? "⚠️ 执行结果" : "执行结果"}</span><pre class="tool-result${isErr ? " tool-result-error" : ""}">${esc(rp)}</pre>${timeText ? `<div class="tool-dur">耗时: ${esc(timeText)}</div>` : ""}</div>`
+      : "";
+
+    const head = `<span class="tool-icon">${isErr ? "⚠️" : "🔧"}</span>
+      <span class="tool-name">${esc(t.name)}</span>
+      <code class="tool-summary">${esc(summary)}</code>
+      ${timeText ? `<span class="tool-time">${esc(timeText)}</span>` : ""}
+      <span class="tool-toggle">›</span>`;
+
+    const detail = paramHtml || resultHtml
+      ? paramHtml + resultHtml
+      : `<div class="tool-block"><span class="tool-lbl">状态</span><span>正在执行…</span></div>`;
+
+    return `<div class="tool-chip${isErr ? " error" : ""}">
+      <button type="button" class="tool-head">${head}</button>
+      <div class="tool-detail">${detail}</div>
+    </div>`;
+  }
+
+  // 深度思考卡片：复用工具卡片的折叠体系。
+  // live=true 表示思考进行中（默认展开 + 呼吸点）；live=false 表示思考完毕（自动折叠，点头部展开阅读）。
+  function thinkChipHtml(text, live) {
+    const summary = live ? "思考中…" : `${text.length} 字 · 点击展开`;
+    const inner = esc(text || "");
+    return `<div class="tool-chip think-chip${live ? " thinking open" : ""}">
       <button type="button" class="tool-head">
-        <span class="tool-icon">${t.is_error ? "⚠️" : "🔧"}</span>
-        <span class="tool-name">${esc(t.name)}</span>
+        <span class="tool-icon">🧠</span>
+        <span class="tool-name">深度思考</span>
         <code class="tool-summary">${esc(summary)}</code>
-        ${t.duration ? `<span class="tool-time">${t.duration.toFixed(1)}s</span>` : ""}
         <span class="tool-toggle">›</span>
       </button>
-      <div class="tool-detail">${detail || `<div class="tool-line"><span class="tool-lbl">结果</span><span class="tool-result">（无输出）</span></div>`}</div>
+      <div class="tool-detail">
+        <div class="tool-block"><pre>${inner}</pre></div>
+      </div>
     </div>`;
   }
 
@@ -186,6 +332,13 @@
         conversations = conversations.filter((x) => x.id !== c.id);
         if (currentId === c.id) { currentId = null; renderMessages(); }
         saveConvs(); renderConvList();
+        // 若删除的是正在运行任务的会话：停止任务并清理 live 气泡登记，防止后台空跑/误挂
+        const act = getActiveTask();
+        if (act && act.convId === c.id) {
+          if (act.taskId) stopTask(act.taskId);
+          clearActiveTask();
+          if (liveView && liveView.convId === c.id) liveView = null;
+        }
         // 同步清理 agent-mini 端的会话上下文
         fetch(`/api/session/${encodeURIComponent(c.id)}`, { method: "DELETE" }).catch(() => {});
       };
@@ -193,7 +346,7 @@
     }
   }
 
-  function msgNode(role, text, tools) {
+  function msgNode(role, text, tools, reasoning) {
     const div = document.createElement("div");
     div.className = `msg ${role}`;
     const avatar = role === "user" ? "🙂" : "✦";
@@ -201,9 +354,11 @@
     if (role === "user") {
       content = esc(text);
     } else {
+      const reasoningHtml = reasoning
+        ? `<div class="tool-list">${thinkChipHtml(reasoning, false)}</div>` : "";
       const toolsHtml = tools && tools.length
         ? `<div class="tool-list">${tools.map(toolChip).join("")}</div>` : "";
-      content = toolsHtml + md(text);
+      content = reasoningHtml + toolsHtml + md(text);
     }
     div.innerHTML = `<div class="msg-avatar">${avatar}</div><div class="msg-bubble">${content}</div>`;
     return div;
@@ -214,11 +369,18 @@
     const conv = currentConv();
     welcomeEl.style.display = conv && conv.messages.length ? "none" : "";
     topbarTitle.textContent = conv ? conv.title : "新对话";
-    if (!conv) return;
+    if (!conv) { updateCtxRing(); return; }
     for (const m of conv.messages) {
-      messagesEl.appendChild(msgNode(m.role, m.content, m.tools));
+      messagesEl.appendChild(msgNode(m.role, m.content, m.tools, m.reasoning));
+    }
+    // 自愈：若当前会话有"仍在运行的任务气泡"（模型思考/输出中）且它已被 renderMessages
+    // 清出文档（如切走再切回、刷新恢复期间），把它重新挂回消息区尾部。
+    // streaming 为 true 时该任务的流式回调会继续更新这个节点，视图即恢复。
+    if (liveView && liveView.convId === conv.id && streaming && !liveView.aiNode.isConnected) {
+      messagesEl.appendChild(liveView.aiNode);
     }
     scrollBottom();
+    updateCtxRing();   // 切换/新建/加载会话后刷新上下文圆环
   }
 
   function scrollBottom() { chatScroll.scrollTop = chatScroll.scrollHeight; }
@@ -328,8 +490,9 @@
             try { data = JSON.parse(line.slice(5).trim()); } catch { continue; }
             ctx.eventIndex++;
             if (data.content) {
-              ctx.statusTip = "";
-              ctx.full += data.content;
+              // 注意：ctx.full 统一由 ctx.addText 内部累加（addText 会把 delta 拼进
+              // ctx.full 并驱动打字机渲染）。这里若再 ctx.full += data.content 会双加，
+              // 导致正文/历史记录整段重复（思考 reasoning 只走 addThink 一条路所以不重复）。
               if (ctx.addText) ctx.addText(data.content);
               if (ctx.setCursor) ctx.setCursor(true);
               if (ctx.smartScroll) ctx.smartScroll(); else scrollBottom();
@@ -337,6 +500,11 @@
             if (data.tool) {
               ctx.tools.push(data.tool);
               if (ctx.addTool) ctx.addTool(data.tool);
+              if (ctx.setCursor) ctx.setCursor(true);
+              if (ctx.smartScroll) ctx.smartScroll(); else scrollBottom();
+            }
+            if (data.reasoning) {
+              if (ctx.addThink) ctx.addThink(data.reasoning);
               if (ctx.setCursor) ctx.setCursor(true);
               if (ctx.smartScroll) ctx.smartScroll(); else scrollBottom();
             }
@@ -384,13 +552,14 @@
     const bubble = aiNode.querySelector(".msg-bubble");
     bubble.innerHTML = `<span class="dots"><span></span><span></span><span></span></span>`;
     messagesEl.appendChild(aiNode);
+    liveView = { convId: conv.id, aiNode };   // 登记进行中任务气泡（切走/重渲染后自愈挂回）
     scrollBottom();
 
     abortCtrl = new AbortController();
     // 有序渲染节点：{type:"text", value} | {type:"tool", tool}
     // 流式过程增量更新（不重建 DOM、不重触发动画），工具卡片按到达顺序插入，不再固定堆在文本上方
-    const ctx = { full: "", tools: [], nodes: [], nodeEls: [], statusTip: "", normalDone: false, eventIndex: 0 };
-    bubble.innerHTML = `<div class="stream-body"><span class="dots"><span></span><span></span><span></span></span></div>`;
+    const ctx = { full: "", tools: [], reasoning: "", nodes: [], nodeEls: [], statusTip: TIP_WAIT, phase: "wait", normalDone: false, eventIndex: 0, textShown: 0, drainTimer: null, pendingDone: false };
+    bubble.innerHTML = `<div class="stream-body"></div>`;
     const bodyEl = bubble.firstElementChild;
     const tipEl = document.createElement("div");
     tipEl.className = "waiting-tip";
@@ -404,17 +573,27 @@
         el.innerHTML = md(n.value);
         return el;
       }
+      if (n.type === "think") {
+        const el = document.createElement("div");
+        el.className = "tool-list";
+        el.innerHTML = thinkChipHtml(n.value, n.live !== false);
+        return el;
+      }
       const el = document.createElement("div");
       el.className = "tool-list";
       el.innerHTML = toolChip(n.tool);
+      // 规则：尚无结果（执行中/刚发起）默认展开；已返回结果 → 收起
+      const hasRes = n.tool.result_preview !== undefined && n.tool.result_preview !== null;
+      if (!hasRes) el.querySelector(".tool-chip")?.classList.add("open");
       return el;
     };
 
     const rebuildNodes = () => {
-      // 从 full/tools 重建顺序（结束/恢复/错误兜底用；文本在前，工具按原顺序）
+      // 从 full/reasoning/tools 重建顺序（结束/恢复/错误兜底用；思考→文本→工具按原顺序）
       ctx.nodes = [];
       ctx.nodeEls = [];
       bodyEl.innerHTML = "";
+      if (ctx.reasoning) ctx.nodes.push({ type: "think", value: ctx.reasoning, live: false });
       if (ctx.full) ctx.nodes.push({ type: "text", value: ctx.full });
       for (const t of ctx.tools) ctx.nodes.push({ type: "tool", tool: t });
       for (const n of ctx.nodes) {
@@ -427,30 +606,89 @@
     };
 
     const syncTip = () => {
-      const show = !!ctx.statusTip && !ctx.nodes.length;
+      const show = !!ctx.statusTip;
       tipEl.style.display = show ? "" : "none";
       tipEl.textContent = show ? ctx.statusTip : "";
     };
 
+    // 打字机式平滑输出：后端常把整段正文一次性送达，逐字 reveal 消除"崩一下"。
+    // ctx.full 始终是完整文本；textNodeIdx 指向唯一的正文节点；drainTimer 定时器按节奏
+    // 把 ctx.full 的前缀逐步渲染到该节点，flushText 在结束时补完剩余内容。
+    let textNodeIdx = -1;
+    const ensureTextNode = () => {
+      // 全气泡只保留一个正文节点：正文被工具切段时复用已有节点，避免重复渲染
+      const found = ctx.nodes.findIndex((n) => n.type === "text");
+      if (found !== -1) { textNodeIdx = found; return found; }
+      ctx.nodes.push({ type: "text", value: "" });
+      const el = renderNode(ctx.nodes[ctx.nodes.length - 1]);
+      bodyEl.insertBefore(el, tipEl);
+      ctx.nodeEls.push(el);
+      textNodeIdx = ctx.nodeEls.length - 1;
+      return textNodeIdx;
+    };
     ctx.addText = (delta) => {
-      ctx.statusTip = "";
-      bodyEl.querySelector(".dots")?.remove();
-      const last = ctx.nodes[ctx.nodes.length - 1];
-      if (last && last.type === "text") {
-        last.value += delta;
-        ctx.nodeEls[ctx.nodeEls.length - 1].innerHTML = md(last.value); // 仅重渲该文本节点
-      } else {
-        ctx.nodes.push({ type: "text", value: delta });
-        const el = renderNode(ctx.nodes[ctx.nodes.length - 1]);
-        bodyEl.insertBefore(el, tipEl);
-        ctx.nodeEls.push(el);
+      ctx.touch?.();   // 有正文到达：刷新"空窗期等待"计时
+      // 正文真正开始前的纯空白噪音（agent-mini 多轮分隔的 \n）直接跳过，
+      // 不切"输出中"状态、不建文本节点
+      if (delta) {
+        const nextFull = ctx.full + delta;
+        if (!ctx.full.trim() && !delta.trim()) { ctx.full = nextFull; syncTip(); return; }
+        ctx.full = nextFull;
       }
+      if (!ctx.full.trim()) return;
+      ctx.collapseThink?.(); // 开始输出正文 → 折叠深度思考
+      ctx.setPhase("output", TIP_OUTPUT);
+      bodyEl.querySelector(".dots")?.remove(); // 兼容旧版残留占位
+      ensureTextNode();
+      ctx.nodes[textNodeIdx].value = ctx.full; // 值始终为完整文本（结束/恢复可直接渲染）
+      ctx.startDrain?.();
       syncTip();
     };
+    ctx.startDrain = () => {
+      if (ctx.drainTimer) return;
+      const tick = () => {
+        const el = ctx.nodeEls[textNodeIdx];
+        if (!el) { ctx.drainTimer = null; return; }
+        if (ctx.textShown >= ctx.full.length) {
+          clearInterval(ctx.drainTimer);
+          ctx.drainTimer = null;
+          if (ctx.pendingDone) { ctx.pendingDone = false; ctx.flushText?.(); scrollBottom(); }
+          return;
+        }
+        // 每次推进少量字符，产生"正在输出"的观感
+        ctx.textShown = Math.min(ctx.full.length, ctx.textShown + 2);
+        const shown = ctx.full.slice(0, ctx.textShown);
+        ctx.nodes[textNodeIdx].value = shown;
+        // 打字阶段用纯文本 pre-wrap 逐步追加（不逐帧解析 markdown），
+        // 避免每 2 字符一次完整 md 重排导致气泡/滚动"跳一下"
+        el.style.whiteSpace = "pre-wrap";
+        el.textContent = shown;
+      };
+      ctx.drainTimer = setInterval(tick, 28);
+      tick(); // 立即先补一帧，避免积压文字迟迟不出
+    };
+    ctx.flushText = () => {
+      if (ctx.drainTimer) { clearInterval(ctx.drainTimer); ctx.drainTimer = null; }
+      ctx.textShown = ctx.full.length;
+      // 只收尾当前正文节点，避免把全文重复写进多个 text 节点（气泡重复字样的根因）
+      const n = ctx.nodes[textNodeIdx];
+      if (n && n.type === "text") {
+        n.value = ctx.full;
+        const tel = ctx.nodeEls[textNodeIdx];
+        if (tel) {
+          tel.style.whiteSpace = "";   // 结束输出：回到正常排版，一次性渲染完整 markdown
+          tel.innerHTML = md(ctx.full);
+        }
+      }
+    };
+
+    // 深度思考：整个回答只保留一张卡片；多次工具轮的思考内容累积追加
 
     ctx.addTool = (tool) => {
-      ctx.statusTip = "";
-      bodyEl.querySelector(".dots")?.remove();
+      ctx.touch?.();   // 工具事件到达：刷新空窗期计时（含发起/结果）
+      // 注意：不在工具到达时折叠思考气泡——保留当前轮思考内容可读；
+      // 等下一轮思考或最终正文开始时再折叠（见 addThink/addText）
+      bodyEl.querySelector(".dots")?.remove(); // 兼容旧版残留占位
       // bridge 对同一工具发两次事件：先带 arguments（无结果），后带 result_preview（无 arguments）→ 合并到同一节点
       const hasResult = tool.result_preview !== undefined && tool.result_preview !== null;
       const noArgs = !tool.arguments || !Object.keys(tool.arguments).length;
@@ -459,23 +697,92 @@
         if (last && last.type === "tool") {
           last.tool = Object.assign({}, last.tool, tool); // 合并结果/耗时/错误态
           ctx.nodeEls[ctx.nodeEls.length - 1].innerHTML = toolChip(last.tool);
+          ctx.setPhase("wait", TIP_WAIT); // 工具已结束：下一段思考/输出尚未到达 → 等待模型响应
           return;
         }
       }
       ctx.nodes.push({ type: "tool", tool });
+      ctx.setPhase("exec", TIP_EXEC); // 工具发起：状态行提示“执行命令中……”
       const el = renderNode(ctx.nodes[ctx.nodes.length - 1]);
       bodyEl.insertBefore(el, tipEl);
       ctx.nodeEls.push(el);
       syncTip();
     };
 
+    // 深度思考：每个"思考轮"独立一个卡片。同一段思考的分块追加到当前卡；
+    // 工具结果之后的新一轮思考 → 在工具下方新建一张卡（不再合并进旧卡）。
+    ctx.addThink = (delta) => {
+      ctx.touch?.();   // 深度思考 token 到达：不再是"干等"，交给思考卡展示
+      ctx.setPhase("think", "");   // 卡片本身即状态，隐藏顶部提示行避免重复
+      const nodes = ctx.nodes;
+      const last = nodes[nodes.length - 1];
+      if (last && last.type === "think" && last.live) {
+        // 同一段思考的后续分块 → 追加到当前气泡
+        ctx.reasoning += delta;
+        last.value += delta;
+        const el = ctx.nodeEls[nodes.length - 1];
+        const pre = el && el.querySelector("pre");
+        if (pre) {
+          const nearBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 60;
+          pre.textContent = last.value;
+          if (nearBottom) pre.scrollTop = pre.scrollHeight;
+        }
+      } else {
+        // 新一轮思考（常见于工具结果之后）：
+        // 先折叠之前所有老思考气泡，只保留当前轮展开并锁底给用户看
+        ctx.collapseThink?.();
+        ctx.reasoning += (ctx.reasoning ? "\n\n" : "") + delta;
+        nodes.push({ type: "think", value: delta, live: true });
+        const el = renderNode(nodes[nodes.length - 1]);
+        bodyEl.insertBefore(el, tipEl);
+        ctx.nodeEls.push(el);
+      }
+      syncTip();
+    };
+    // 思考完毕（开始输出 / 发起工具）→ 折叠思考卡片
+    ctx.collapseThink = () => {
+      for (let i = 0; i < ctx.nodes.length; i++) {
+        const n = ctx.nodes[i];
+        if (n.type === "think" && n.live) {
+          n.live = false;
+          const fresh = renderNode(n);
+          ctx.nodeEls[i].replaceWith(fresh);
+          ctx.nodeEls[i] = fresh;
+        }
+      }
+    };
+
     ctx.rebuild = rebuildNodes;
     ctx.syncTip = syncTip;
+    // 阶段状态：仅在阶段/文案真正变化时才更新 DOM，避免高频 token 抖动
+    ctx.setPhase = (phase, text) => {
+      if (ctx.phase === phase && ctx.statusTip === text) return;
+      ctx.phase = phase;
+      ctx.statusTip = text;
+      syncTip();
+    };
+    ctx.finishTip = () => { ctx.setPhase("done", ""); };
     ctx.setCursor = (on) => bubble.classList.toggle("typing-cursor", !!on);
     ctx.smartScroll = () => {
       const c = chatScroll;
       if (c.scrollHeight - c.scrollTop - c.clientHeight < 140) c.scrollTop = c.scrollHeight;
     };
+    // 最近一次"真实产出"（思考/正文/工具事件）时间：用于空窗期等待提示
+    ctx.lastActivity = Date.now();
+    ctx.touch = () => { ctx.lastActivity = Date.now(); };
+    syncTip(); // 立即显示“⏳ 等待模型响应……”
+    // 空窗期提示：任何真实事件都会 touch()；长时间无产出时提示"等待模型响应 + 已等待秒数"
+    const waitWatch = setInterval(() => {
+      if (ctx.normalDone || ctx.phase === "done") return;
+      if (ctx.phase !== "wait") return;   // 思考卡/输出/工具执行中各自有自己的提示
+      const waited = Math.floor((Date.now() - ctx.lastActivity) / 1000);
+      if (waited >= 2) {
+        ctx.setPhase("wait", `⏳ 等待模型响应……（已等待 ${waited} 秒）`);
+      } else {
+        ctx.setPhase("wait", TIP_WAIT);
+      }
+    }, 2000);
+    ctx.waitWatch = waitWatch;
 
     const repaint = (cursor) => {
       // 结束/恢复/错误时的重绘：保留流式过程的有序 nodes（工具与文本交错），不整体重建
@@ -485,12 +792,17 @@
         const last = ctx.nodes[ctx.nodes.length - 1];
         if (last && last.type === "text") {
           last.value = ctx.full; // 同步完整文本（含结束/错误追加）
-          ctx.nodeEls[ctx.nodeEls.length - 1].innerHTML = md(ctx.full);
+          // 打字机进行中不整体重绘，交给 drain 定时器收尾
+          if (!ctx.drainTimer) {
+            const tel = ctx.nodeEls[ctx.nodeEls.length - 1];
+            if (tel) { tel.style.whiteSpace = ""; tel.innerHTML = md(ctx.full); }
+          }
         } else {
           ctx.addText(ctx.full || ""); // 最后节点是工具：补一个文本节点
         }
         syncTip();
       }
+      ctx.collapseThink?.(); // 结束/中断兜底：确保思考卡片始终处于折叠态
       ctx.setCursor(cursor);
       scrollBottom();
     };
@@ -522,14 +834,27 @@
         ctx.full = ctx.full ? ctx.full + `\n\n⚠️ ${friendlyError(err)}` : `⚠️ ${friendlyError(err)}`;
       }
     } finally {
+      clearTimeout(ctx.waitWatch);
+      // 正常结束时若打字机还在跑，让队列自然播完（done 时刻已收到完整文本）；
+      // 错误/中断/无内容则立即补完剩余部分。
+      if (ctx.drainTimer) ctx.pendingDone = true;
+      else ctx.flushText?.();
       repaint(false);
-      if (ctx.full || ctx.tools.length) {
-        conv.messages.push({ role: "assistant", content: ctx.full, tools: ctx.tools.length ? ctx.tools : undefined });
+      ctx.finishTip(); // 结束/停止/出错统一隐藏阶段状态行（放在 repaint 后，避免被重绘重新点亮）
+      if (ctx.full || ctx.tools.length || ctx.reasoning) {
+        conv.messages.push({
+          role: "assistant",
+          content: ctx.full,
+          tools: ctx.tools.length ? ctx.tools : undefined,
+          reasoning: ctx.reasoning || undefined,
+        });
         saveConvs();
       }
       clearActiveTask();
       setStreaming(false);
+      if (liveView && liveView.aiNode === aiNode) liveView = null; // 任务结束：live 气泡已收尾
       scrollBottom();
+      updateCtxRing();   // 回复完成后刷新上下文用量
       if (ctx.normalDone && ctx.full) notifyReply(ctx.full);
     }
   }
@@ -554,25 +879,40 @@
     } catch { return; }
 
     if (st.status === "done" || st.status === "cancelled" || st.status === "error") {
-      if (st.content) {
+      // 正文可能为空但仍有思考/工具（如中途结束），任一有内容就应收录显示
+      const content = st.content || "";
+      const hasAny = content || (st.tools && st.tools.length) || st.reasoning;
+      if (hasAny) {
         const last = conv.messages[conv.messages.length - 1];
-        if (!(last && last.role === "assistant" && last.content === st.content)) {
-          conv.messages.push({ role: "assistant", content: st.content, tools: st.tools && st.tools.length ? st.tools : undefined });
+        const dup = last && last.role === "assistant"
+          && (last.content || "") === content
+          && (last.reasoning || "") === (st.reasoning || "");
+        if (!dup) {
+          conv.messages.push({
+            role: "assistant",
+            content,
+            tools: st.tools && st.tools.length ? st.tools : undefined,
+            reasoning: st.reasoning || undefined,
+          });
           saveConvs();
         }
         renderMessages();
-        if (st.status === "done") notifyReply(st.content);
+        if (st.status === "done" && content) notifyReply(content);
       }
       clearActiveTask();
       return;
     }
 
-    const ctx = { full: st.content || "", tools: st.tools || [], normalDone: false, eventIndex: st.event_count || 0 };
+    const ctx = { full: st.content || "", tools: st.tools || [], reasoning: st.reasoning || "", normalDone: false, eventIndex: st.event_count || 0 };
     let bubble = null;
     const repaint = (cursor) => {
       if (!bubble) return;
+      // 服务端还没有任何事件（模型冷启动思考前的空窗）：保留加载指示，不渲染空白
+      if (!ctx.reasoning && !ctx.tools.length && !ctx.full) return;
+      const reasoningHtml = ctx.reasoning
+        ? `<div class="tool-list">${thinkChipHtml(ctx.reasoning, false)}</div>` : "";
       const toolsHtml = ctx.tools.length ? `<div class="tool-list">${ctx.tools.map(toolChip).join("")}</div>` : "";
-      bubble.innerHTML = toolsHtml + md(ctx.full);
+      bubble.innerHTML = reasoningHtml + toolsHtml + md(ctx.full);
       bubble.classList.toggle("typing-cursor", !!cursor);
       scrollBottom();
     };
@@ -580,13 +920,16 @@
     ctx.repaint = repaint;
     ctx.addText = (delta) => { ctx.full += delta; repaint(true); };
     ctx.addTool = (tool) => { ctx.tools.push(tool); repaint(true); };
+    ctx.addThink = (delta) => { ctx.reasoning += (ctx.reasoning ? "\n\n" : "") + delta; repaint(true); };
     ctx.setCursor = (on) => repaint(on);
     ctx.smartScroll = () => scrollBottom();
     ctx.syncTip = () => {};
 
     const aiNode = msgNode("assistant", "");
     bubble = aiNode.querySelector(".msg-bubble");
+    bubble.innerHTML = `<span class="dots"><span></span><span></span><span></span></span>`; // 等待加载指示
     messagesEl.appendChild(aiNode);
+    liveView = { convId: saved.convId, aiNode }; // 恢复的任务气泡同样登记：后续切走/重渲染可自愈挂回
     repaint(false);
     setStreaming(true);
     abortCtrl = new AbortController();
@@ -595,15 +938,21 @@
       await streamLoop(saved.taskId, ctx, repaint, abortCtrl);
     } catch { /* 恢复中断（如用户停止），忽略 */ }
 
-    if (ctx.full || ctx.tools.length) {
+    if (ctx.full || ctx.tools.length || ctx.reasoning) {
       const last = conv.messages[conv.messages.length - 1];
       if (!(last && last.role === "assistant" && last.content === ctx.full)) {
-        conv.messages.push({ role: "assistant", content: ctx.full, tools: ctx.tools.length ? ctx.tools : undefined });
+        conv.messages.push({
+          role: "assistant",
+          content: ctx.full,
+          tools: ctx.tools.length ? ctx.tools : undefined,
+          reasoning: ctx.reasoning || undefined,
+        });
         saveConvs();
       }
     }
     clearActiveTask();
     setStreaming(false);
+    if (liveView && liveView.aiNode === aiNode) liveView = null; // 恢复任务结束
     renderMessages();
     scrollBottom();
     if (ctx.normalDone && ctx.full) notifyReply(ctx.full);
@@ -714,18 +1063,20 @@
     localStorage.setItem("am_theme", next);
   };
 
-  // 设置（展示 agent-mini 当前配置）
+  // 设置（展示 agent-mini 当前配置；2026-09-07 起引擎固定 agent-mini，EffGen 已移除）
   $("settingsBtn").onclick = async () => {
     settingsModal.hidden = false;
     const body = $("settingsInfo");
     body.innerHTML = "读取中…";
     try {
       const cfg = await (await fetch("/api/config")).json();
+      assistantName.textContent = "agent-mini";
       body.innerHTML = cfg.bridge
         ? `<div class="info-row"><span>Provider</span><b>${esc(cfg.provider)}</b></div>
            <div class="info-row"><span>模型</span><b>${esc(cfg.model)}</b></div>
+           <div class="info-row"><span>引擎</span><b>agent-mini</b></div>
            <div class="info-row"><span>桥接服务</span><b class="ok">已连接</b></div>
-           <p class="info-tip">修改模型或参数请编辑 <code>~/.agent-mini/config.json</code>，然后重启 agent_bridge.py</p>`
+           <p class="info-tip">切换模型后，下一条消息自动生效（无需重启）</p>`
         : `<div class="info-row"><span>桥接服务</span><b class="err">未连接</b></div>
            <p class="info-tip">请先启动：<br><code>agent-mini venv 的 python.exe agent_bridge.py</code></p>`;
     } catch {
@@ -734,6 +1085,11 @@
   };
   $("closeSettings").onclick = () => (settingsModal.hidden = true);
   settingsModal.onclick = (e) => { if (e.target === settingsModal) settingsModal.hidden = true; };
+
+  // 引擎固定 agent-mini：顶栏助手名直接显示
+  function syncBackend() {
+    assistantName.textContent = "agent-mini";
+  }
 
   // 当前选中的模型（provider/model），发送时其实无需传给后端——
   // 因为切换模型时已直接改写 config.json，而每次 agent 任务都是新子进程
@@ -765,21 +1121,22 @@
   // 渲染模型下拉选择器
   function renderModelPicker(models, activeProvider) {
     modelSelect.innerHTML = "";
-    let activeFound = null;
+    // 只应有一个"当前选中"：
+    //  1) 后端明确标记 active 的模型；2) 否则当前 provider 组里的第一个；
+    //  3) 否则列表第一个。（旧逻辑给 provider 组内每个模型都设 selected，
+    //  浏览器只保留最后一项 → 刷新后显示 ollama 列表最后一个而非当前选择。）
+    let chosen = models.find((m) => m.active)
+      || models.find((m) => m.provider === activeProvider)
+      || models[0] || null;
     for (const m of models) {
       const opt = document.createElement("option");
       opt.value = `${m.provider}||${m.model}`;
       opt.textContent = `${m.provider} · ${m.model}`;
-      if (m.active || m.provider === activeProvider) {
-        opt.selected = true;
-        activeFound = m;
-      }
+      if (m === chosen) opt.selected = true;
       modelSelect.appendChild(opt);
     }
-    if (activeFound) {
-      currentModel = { provider: activeFound.provider, model: activeFound.model };
-    } else if (models.length) {
-      currentModel = { provider: models[0].provider, model: models[0].model };
+    if (chosen) {
+      currentModel = { provider: chosen.provider, model: chosen.model };
     }
     updateModelBadgeText();
   }
@@ -826,6 +1183,8 @@
   renderConvList();
   renderMessages();
   updateBadge();
+  syncBackend();          // 同步设置页引擎复选框
+  loadCtxConfig();        // 读取上下文上限并刷新圆环
   input.focus();
   ensureNotificationPermission();   // 浏览器无 Capacitor，自动跳过
   recoverActiveTask();              // 页面（重）打开时恢复进行中任务

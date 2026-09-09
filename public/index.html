@@ -69,7 +69,7 @@
         <!-- 欢迎页 -->
         <div class="welcome" id="welcome">
           <div class="welcome-logo">✦</div>
-          <h1>嗨，我是 <span class="grad-text">agent-mini</span></h1>
+          <h1>嗨，我是 <span class="grad-text" id="assistantName">agent-mini</span></h1>
           <p>跑在你本机 Ollama 上的私人智能体，随便聊点什么吧</p>
           <div class="suggestions" id="suggestions">
             <button class="suggestion-card" data-q="帮我看看当前目录下有哪些文件，按大小排个序">
@@ -102,6 +102,13 @@
       <div class="composer-wrap">
         <div class="composer" id="composer">
           <textarea id="input" rows="1" placeholder="说点什么… (Enter 发送，Shift+Enter 换行)"></textarea>
+          <!-- 上下文用量圆环（点击弹出详情/调节最大值） -->
+          <button class="ctx-ring-btn" id="ctxRing" title="上下文用量">
+            <svg viewBox="0 0 36 36" width="22" height="22">
+              <circle class="ctx-ring-bg" cx="18" cy="18" r="15.5"></circle>
+              <circle class="ctx-ring-fg" id="ctxRingArc" cx="18" cy="18" r="15.5"></circle>
+            </svg>
+          </button>
           <button class="send-btn" id="sendBtn" title="发送">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M3.4 20.4l17.45-7.48c.81-.35.81-1.49 0-1.84L3.4 3.6c-.66-.29-1.39.2-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .72.73 1.2 1.39.91z"/></svg>
           </button>
@@ -135,6 +142,26 @@
     </div>
   </div>
 
+  <!-- 上下文用量弹窗 -->
+  <div class="modal-mask" id="ctxModal" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h2>上下文用量</h2>
+        <button class="icon-btn" id="closeCtx" title="关闭">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div id="ctxDetail">读取中…</div>
+        <div class="ctx-row">
+          <span class="ctx-lbl">上下文最大值</span>
+          <input type="range" id="ctxMaxRange" min="1024" max="65536" step="1024">
+          <span class="ctx-val" id="ctxMaxVal">8192</span><span class="ctx-unit">tokens</span>
+        </div>
+        <p class="ctx-note">用量按会话文本长度估算（非模型精确计数）。拖动滑块调整最大值，写入配置后下一条消息生效。</p>
+      </div>
+    </div>
+  </div>
+
   <script src="app.js"></script>
-</body>
-</html>
+</body></html>

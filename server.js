@@ -91,6 +91,10 @@ function broadcast(task, data) {
 function persistTask(task) {
   const content = task.events.filter((e) => "content" in e).map((e) => e.content).join("");
   const tools = task.events.filter((e) => "tool" in e).map((e) => e.tool);
+  // reasoning 事件是思考文本的连续片段（可能被切成小块/多块），用 "" 直接拼回
+  // 完整思维链（与前端 ctx.reasoning += delta 一致）；用 "\n\n" 会把每个分块
+  // 之间塞空行，造成逐 token 断行。
+  const reasoning = task.events.filter((e) => "reasoning" in e).map((e) => e.reasoning).join("");
   const file = path.join(SESSION_DIR, `${task.sessionId}.json`);
   let data = { sessionId: task.sessionId, messages: [] };
   try {
@@ -103,6 +107,7 @@ function persistTask(task) {
     role: "assistant",
     content,
     tools: tools.length ? tools : undefined,
+    reasoning: reasoning.trim() ? reasoning : undefined,
     time: Date.now(),
     taskId: task.id,
   });
@@ -290,11 +295,13 @@ function handleState(res, taskId) {
   if (!task) return sendJson(res, 404, { error: "任务不存在或已过期" });
   const content = task.events.filter((e) => "content" in e).map((e) => e.content).join("");
   const tools = task.events.filter((e) => "tool" in e).map((e) => e.tool);
+  const reasoning = task.events.filter((e) => "reasoning" in e).map((e) => e.reasoning).join(""); // 连续拼接，与 persistTask/前端一致
   return sendJson(res, 200, {
     taskId,
     status: task.status,
     content,
     tools,
+    reasoning: reasoning.trim() ? reasoning : undefined,
     event_count: task.events.length,
   });
 }

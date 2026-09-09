@@ -22,6 +22,8 @@ const PORT = parseInt(process.env.BRIDGE_PORT || '8765');
 const MEMORY_FILE = process.env.MEMORY_FILE || './memory.json';
 // Termux 命令目录（termux-wake-lock 等都在 $PREFIX/bin 下）
 const PREFIX = process.env.PREFIX || '/data/data/com.termux/files/usr';
+// EffGen 后端执行器（backend=effgen 时使用）
+const EFFGEN_RUNNER = path.join(__dirname, 'effgen_runner.py');
 
 // ============ 屏幕控制开关（云端/本地模型判断） ============
 // 读取 ~/.agent-mini/config.json：
@@ -29,6 +31,25 @@ const PREFIX = process.env.PREFIX || '/data/data/com.termux/files/usr';
 //  - 指向 localhost/内网（本地模型，如 ollama）→ 正常亮屏/息屏
 //  - 也可在 config.json 顶层显式设置 "screenControl": true/false 强制覆盖（agent-mini 会忽略该字段，无副作用）
 const AGENT_CONFIG = path.join(process.env.HOME || '', '.agent-mini', 'config.json');
+
+// ============ 后端引擎判断 ============
+// 2026-09-07：正式放弃 EffGen（太笨重），仅保留 agent-mini 引擎。
+// 无论 config 里 backend 写什么，一律返回 agent-mini；EffGen 相关分支/文件停用。
+function agentBackend() {
+    return 'agent-mini';
+}
+
+// EffGen 所在 Python 解释器：
+//  - Windows：effgen venv（本机已装），可用 EFFGEN_PYTHON 覆盖
+//  - Linux/Termux：默认 python3（需已 pip install effgen），可用 EFFGEN_PYTHON 覆盖
+function effgenPythonBin() {
+    if (process.env.EFFGEN_PYTHON) return process.env.EFFGEN_PYTHON;
+    if (process.platform === 'win32') {
+        const home = process.env.USERPROFILE || '';
+        return path.join(home, '.workbuddy', 'binaries', 'python', 'envs', 'effgen', 'Scripts', 'python.exe');
+    }
+    return 'python3';
+}
 
 function screenControlEnabled() {
     try {
@@ -305,14 +326,31 @@ class AgentManager {
 
         console.log(`[Agent] 🚀 启动任务 ${task.id}, 消息: ${message.slice(0, 50)}...`);
 
-        // 构建 Python 脚本（传入会话历史，保证多轮上下文）
-        const pythonScript = this.buildPythonScript(
-            task.id, session.sessionId || 'default', message, session.conversation || []
-        );
+        // 后端引擎：agent-mini（内嵌 Python 脚本）或 effgen（effgen_runner.py）
+        const backend = agentBackend();
+        const sessionId = session.sessionId || 'default';
+        let pythonBin;
+        let pythonArgs;
 
-        // 启动 Python 子进程（Termux 下统一用 python3，可用 AGENT_MINI_PYTHON 覆盖）
-        const pythonBin = process.env.AGENT_MINI_PYTHON || 'python3';
-        const python = spawn(pythonBin, ['-c', pythonScript], {
+        if (backend === 'effgen') {
+            // EffGen：独立 runner 文件，参数 base64 传递，协议与内嵌脚本一致
+            pythonBin = effgenPythonBin();
+            pythonArgs = [
+                EFFGEN_RUNNER,
+                task.id, sessionId,
+                Buffer.from(message).toString('base64'),
+                Buffer.from(JSON.stringify(session.conversation || [])).toString('base64')
+            ];
+        } else {
+            // agent-mini：内嵌 Python 脚本（传入会话历史，保证多轮上下文）
+            const pythonScript = this.buildPythonScript(
+                task.id, sessionId, message, session.conversation || []
+            );
+            // 启动 Python 子进程（Termux 下统一用 python3，可用 AGENT_MINI_PYTHON 覆盖）
+            pythonBin = process.env.AGENT_MINI_PYTHON || 'python3';
+            pythonArgs = ['-c', pythonScript];
+        }
+        const python = spawn(pythonBin, pythonArgs, {
             stdio: ['pipe', 'pipe', 'pipe']
         });
 
@@ -448,9 +486,15 @@ async def main():
                 }
             })
 
+        # 深度思考：agent-mini 剥离的 <think> 内容经 on_thinking 实时转发前端面板
+        async def on_thinking(text):
+            if text:
+                emit({"reasoning": text})
+
         # 运行 Agent（conversation 会被 agent.run 原地追加本轮 user/assistant）
         result = await agent.run(message, conversation,
-                                  on_stream=on_stream, on_tool_event=on_tool_event)
+                                  on_stream=on_stream, on_tool_event=on_tool_event,
+                                  on_thinking=on_thinking)
 
         # 先把更新后的会话上下文回传给 Node（必须在 done 之前，否则会被丢弃）
         emit({"_conversation": conversation})
@@ -567,13 +611,17 @@ app.get('/info', (req, res) => {
         const config = readConfig();
         let provider = 'ollama';
         let model = '?';
+        let numCtx = 8192;
         if (config) {
             provider = config.provider || 'ollama';
-            model = (config.providers || {})[provider]?.model || '?';
+            const prov = (config.providers || {})[provider] || {};
+            model = prov.model || '?';
+            const n = parseInt(prov.numCtx, 10);
+            if (n && n > 0) numCtx = n;
         }
-        res.json({ provider, model });
+        res.json({ provider, model, numCtx, backend: agentBackend() });
     } catch (err) {
-        res.json({ provider: 'unknown', model: 'unknown' });
+        res.json({ provider: 'unknown', model: 'unknown', numCtx: 8192, backend: agentBackend() });
     }
 });
 
@@ -640,33 +688,60 @@ app.get('/models', async (req, res) => {
     }
 });
 
-// ============ 切换模型 ============
-// body: { provider: "ollama"|"local"|..., model: "qwen3:8b" }
-// 只在 config.json 里已有的 provider 之间切换，且只改 provider 字段和对应
-// providers[x].model 字段；绝不触碰 apiKey 等敏感字段。写回后立即生效。
+// ============ 切换模型 / 后端 ============
+// body 支持三种用法：
+//   1) { provider, model } —— 切换模型（原逻辑，只在已有 provider 间切）
+//   2) { backend: "effgen"|"agent-mini" } —— 切换后端引擎（顶层字段）
+//   3) 两者同时 —— 先切后端再切模型
 app.post('/config', (req, res) => {
     try {
-        const { provider, model } = req.body || {};
+        const { provider, model, backend, numCtx } = req.body || {};
         const config = readConfig();
         if (!config) {
             return res.status(500).json({ error: '配置文件不存在或无法读取' });
         }
+        config.providers = config.providers || {};
+
+        // 后端引擎：2026-09-07 起仅支持 agent-mini（EffGen 已弃用，写 effgen 一律回落到 agent-mini）
+        if (backend !== undefined && backend !== null) {
+            const b = String(backend).trim();
+            if (b !== 'agent-mini' && b !== 'effgen') {
+                return res.status(400).json({ error: `未知的 backend: ${backend}（仅支持 agent-mini）` });
+            }
+            if (b === 'effgen') {
+                console.warn('[Config] EffGen 已弃用，忽略 backend=effgen，保持 agent-mini');
+            }
+            config.backend = 'agent-mini';
+            console.log('[Config] 后端引擎：agent-mini');
+        }
+
         const providers = config.providers || {};
-        if (!provider || !providers[provider]) {
-            return res.status(400).json({ error: `未知的 provider: ${provider}` });
+        if (provider && providers[provider]) {
+            // 切换 provider
+            config.provider = provider;
+            // 如果指定了模型且非空，更新对应 provider 的 model
+            if (model && String(model).trim()) {
+                providers[provider].model = String(model).trim();
+            }
         }
-        // 切换 provider
-        config.provider = provider;
-        // 如果指定了模型且非空，更新对应 provider 的 model
-        if (model && String(model).trim()) {
-            providers[provider].model = String(model).trim();
+
+        // 上下文最大值 numCtx：写入对应 provider（未指定 provider 时用当前 provider）
+        if (numCtx !== undefined && numCtx !== null) {
+            const target = (provider && providers[provider]) ? provider : config.provider;
+            const n = parseInt(numCtx, 10);
+            if (n && n >= 512 && n <= 131072) {
+                providers[target].numCtx = n;
+                console.log(`[Config] ${target} 上下文上限 -> ${n}`);
+            }
         }
+
         // 写回
         const configPath = getConfigPath();
         fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-        const newModel = providers[provider].model || '?';
-        console.log(`[Config] 模型已切换 -> ${provider} / ${newModel}`);
-        res.json({ ok: true, provider, model: newModel });
+        const newModel = (providers[config.provider] && providers[config.provider].model) || '?';
+        const newNumCtx = parseInt(providers[config.provider] && providers[config.provider].numCtx, 10) || 8192;
+        console.log(`[Config] 模型已切换 -> ${config.provider} / ${newModel}`);
+        res.json({ ok: true, provider: config.provider, model: newModel, numCtx: newNumCtx, backend: config.backend || 'agent-mini' });
     } catch (err) {
         res.status(500).json({ error: `切换失败: ${err.message}` });
     }
