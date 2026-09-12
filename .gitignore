@@ -25,3 +25,7 @@ Thumbs.db
 .backup_*/
 .old/
 monitor.json
+
+# 运行时产物（自动备份目录、散落的日志）
+backup_*/
+*.log
