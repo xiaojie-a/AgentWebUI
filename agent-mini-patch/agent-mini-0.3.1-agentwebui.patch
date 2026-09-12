@@ -70,7 +70,82 @@
      n_recent = _MEMORY_BUDGET.get(tier, 5)
 --- a/agent_mini/agent/loop.py
 +++ b/agent_mini/agent/loop.py
-@@ -93,6 +93,7 @@
+@@ -33,6 +33,24 @@
+ _TRANSIENT_CODES = {429, 500, 502, 503, 504}
+ 
+ 
++def _as_pos_int(value) -> int:
++    """[AgentWebUI patch] 把配置值安全转成正整数；非法/缺失/非正数返回 0。"""
++    try:
++        n = int(value)
++    except (TypeError, ValueError):
++        return 0
++    return n if n > 0 else 0
++
++
++def _as_ratio(value, default: float) -> float:
++    """[AgentWebUI patch] 把配置值限制为 (0, 1] 比例；非法/缺失返回默认值。"""
++    try:
++        r = float(value)
++    except (TypeError, ValueError):
++        return default
++    return r if 0 < r <= 1 else default
++
++
+ @dataclass
+ class ToolEvent:
+     """Emitted when a tool is called or produces a result."""
+@@ -67,7 +85,16 @@
+         self.tools = ToolExecutor(config, memory)
+         self._model_name: str = provider.model_name
+         self._model_tier: str = classify_model_tier(self._model_name)
+-        self._effective_ctx: int = get_effective_context(self._model_name)
++        # [AgentWebUI patch] 有效上下文优先读当前 provider 的 numCtx 配置，
++        # 让前端"上下文最大值"滑杆与后端压缩触发点真正联动；
++        # 未配置 numCtx 时才回退到按模型档位估算的默认值。
++        self._effective_ctx: int = self._resolve_effective_ctx()
++        # [AgentWebUI patch] 压缩比例可配置（默认沿用官方 0.75 触发 / 0.5 目标）
++        _agent_cfg = config.get("agent", {}) or {}
++        self._compact_ratio: float = _as_ratio(_agent_cfg.get("compactRatio"), 0.75)
++        self._compact_target_ratio: float = _as_ratio(
++            _agent_cfg.get("compactTargetRatio"), 0.5
++        )
+         self._output_limit: int = get_output_limit(self._model_name)
+         # Max iterations: respect explicit user config, otherwise use tier default
+         user_iters = config.get("agent", {}).get("maxIterations")
+@@ -82,6 +109,31 @@
+         # Loop detection state
+         self._recent_calls: list[str] = []
+ 
++    def _resolve_effective_ctx(self) -> int:
++        """[AgentWebUI patch] 解析"有效上下文"预算（触发压缩的基准）。
++
++        优先级：
++          1. 当前 provider 的 numCtx —— config["providers"][config["provider"]]["numCtx"]
++          2. 任一 provider 的 numCtx（config["provider"] 缺失/不认识时的兜底）
++          3. 按模型档位估算的默认值（官方原行为）
++
++        这样前端把滑杆写入 config.numCtx 后，后端压缩阈值
++        （effective_ctx * compactRatio）随之联动，无需改代码或重启进程——
++        每次任务由 bridge 重新 load_config() 并新建 AgentLoop。
++        """
++        providers = self.config.get("providers") or {}
++        name = self.config.get("provider")
++        cfg = providers.get(name) if isinstance(providers.get(name), dict) else None
++        if not cfg:
++            for cand in providers.values():
++                if isinstance(cand, dict) and _as_pos_int(cand.get("numCtx")):
++                    cfg = cand
++                    break
++        n = _as_pos_int(cfg.get("numCtx")) if cfg else 0
++        if n > 0:
++            return n
++        return get_effective_context(self._model_name)
++
+     async def close(self) -> None:
+         """Clean up provider and tool resources."""
+         await self.provider.close()
+@@ -93,6 +145,7 @@
          conversation: list[dict],
          on_stream: StreamEmitter | None = None,
          on_tool_event: ToolEventCallback | None = None,
@@ -78,7 +153,7 @@
      ) -> str:
          """Process *user_message* and return the assistant's final text reply.
  
-@@ -129,7 +130,7 @@
+@@ -129,7 +182,7 @@
              pruned = self._prune_tool_results(messages)
  
              response = await self._call_provider_with_retry(
@@ -87,7 +162,32 @@
              )
              if isinstance(response, str):
                  # Error string from retry exhaustion
-@@ -346,7 +347,7 @@
+@@ -149,9 +202,10 @@
+                 conversation.append({"role": "user", "content": user_message})
+                 conversation.append({"role": "assistant", "content": final})
+                 # Token-aware compaction: summarize when conversation
+-                # exceeds 75% of the model's effective context budget.
++                # exceeds compactRatio (默认 75%) of the effective context
++                # budget. [AgentWebUI patch] 比例与预算均可配置。
+                 current_tokens = estimate_messages_tokens(conversation)
+-                if current_tokens > int(self._effective_ctx * 0.75):
++                if current_tokens > int(self._effective_ctx * self._compact_ratio):
+                     await self._summarize_history(conversation)
+                 return final
+ 
+@@ -288,9 +342,9 @@
+     async def _summarize_history(self, conversation: list[dict]) -> None:
+         """Summarize oldest messages in-place to keep context bounded."""
+         # Determine how many messages to summarize: enough to drop below
+-        # 50% of effective context, but at least 6 messages.
++        # compactTargetRatio (默认 50%) of effective context, but at least 6.
+         total = estimate_messages_tokens(conversation)
+-        target = int(self._effective_ctx * 0.5)
++        target = int(self._effective_ctx * self._compact_target_ratio)
+         acc, cut = 0, 0
+         for i, msg in enumerate(conversation):
+             acc += estimate_messages_tokens([msg])
+@@ -346,7 +400,7 @@
          conversation.clear()
          conversation.extend(new_conversation)
  
@@ -96,7 +196,7 @@
          """Call the provider with retry + exponential backoff (with jitter) for transient errors."""
          max_retries = 3
          for attempt in range(max_retries):
-@@ -357,6 +358,7 @@
+@@ -357,6 +411,7 @@
                          on_delta=on_stream,
                          tools=tool_defs or None,
                          temperature=self.temperature,

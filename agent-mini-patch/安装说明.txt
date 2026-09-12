@@ -3,12 +3,14 @@ agent-mini 定制包（AgentWebUI 专用）安装说明
 
 文件清单
 --------
-  agent_mini-0.3.1+agentwebui.2-py3-none-any.whl 已打好补丁的 agent-mini 0.3.1（纯 Python，跨平台）
+  agent_mini-0.3.1+agentwebui.3-py3-none-any.whl 已打好补丁的 agent-mini 0.3.1（纯 Python，跨平台）
   agent-mini-0.3.1-agentwebui.patch              相对官方 0.3.1 的源码补丁（可 git apply）
   SUMMARY.txt                                    逐文件改动统计
+  verify_precise_token.py                        精确 Token 全链路验证（直调 provider + 走 bridge）
+  verify_numctx_linkage.py                       有效上下文/压缩阈值 是否跟随 numCtx 的验证
 
-  版本说明：本地版本号后缀会随改动递增（.1 → .2）。同名版本重复安装时 pip 会跳过，
-  升级请用 `pip install --force-reinstall`（或 `--upgrade`，.2 > .1 会被识别为更新）。
+  版本说明：本地版本号后缀会随改动递增（.1 → .2 → .3）。同名版本重复安装时 pip 会跳过，
+  升级请用 `pip install --force-reinstall`（或 `--upgrade`，.3 > .2 会被识别为更新）。
 
 
 为什么需要这个定制包
@@ -94,22 +96,52 @@ AgentWebUI 依赖 agent-mini，但官方 0.3.1 直接配 AgentWebUI **在任何�
   如果装的 agent-mini 是旧包，UI 会静默退回估算值。
 
 
+【故障 7｜静默失效：有效上下文/压缩阈值被档位钉死，跟 numCtx 脱钩】
+
+  官方 agent/token_estimator.py 把"有效上下文"按模型档位写死：
+
+      tiny=3000   small=6000   medium=12000   cloud=32000
+
+  agent/loop.py 用它在会话超过 有效上下文×0.75 时触发摘要压缩（压缩到 ×0.5）。
+
+  于是：**前端滑杆把 numCtx 调到 35840，压缩照样在 6000×0.75=4500 触发**。
+  "窗口上限"改了等于没改，实际可用上下文与配置无关（8B 模型被当成 small 档）。
+
+  patch 做法：AgentLoop 构造时优先读 config.providers.<当前 provider>.numCtx
+  作为有效上下文（读不到才回退档位默认值），并把压缩比例抽成可配：
+
+      { "agent": { "compactRatio": 0.75, "compactTargetRatio": 0.5 } }
+
+  联动方向：前端「上下文用量」滑杆 -> POST /api/config -> config.numCtx
+            -> bridge 下一任务重新 load_config() 建 AgentLoop（**不用重启服务**）
+
+  对照表（compactRatio=0.75）：
+      numCtx    有效上下文   压缩阈值
+       5120       5120        3840
+       8192       8192        6144
+      35840      35840       26880
+      未设置     档位值       档位值×0.75
+
+  自查：python verify_numctx_linkage.py
+        若 numCtx=35840 那行显示 6000/4500，说明装的还是旧包。
+
+
 安装
 ----
-    pip install agent_mini-0.3.1+agentwebui.2-py3-none-any.whl
+    pip install agent_mini-0.3.1+agentwebui.3-py3-none-any.whl
 
 装进虚拟环境 / 指定目录：
 
     python -m venv myenv
-    myenv/bin/pip install agent_mini-0.3.1+agentwebui.2-py3-none-any.whl
+    myenv/bin/pip install agent_mini-0.3.1+agentwebui.3-py3-none-any.whl
 
-装着旧定制版（+agentwebui / +agentwebui.1）要升级：
+装着旧定制版（+agentwebui / .1 / .2）要升级：
 
-    pip install --force-reinstall --no-deps agent_mini-0.3.1+agentwebui.2-py3-none-any.whl
+    pip install --force-reinstall --no-deps agent_mini-0.3.1+agentwebui.3-py3-none-any.whl
 
 pipx 装的（如 xem）：
 
-    pipx install --force agent_mini-0.3.1+agentwebui.2-py3-none-any.whl
+    pipx install --force agent_mini-0.3.1+agentwebui.3-py3-none-any.whl
 
 离线机器：把 whl 拷过去，连同依赖一起装（依赖见官方包，主要是 httpx）。
 
@@ -129,8 +161,11 @@ pipx 装的（如 xem）：
                                            ChatResponse.usage   【新增，见故障 6】
   3. providers/__init__.py     +1       create_provider 向 OllamaProvider
                                        透传 numCtx          【与 2 必须配对】
-  4. agent/loop.py             +4/-2    run() 新增 on_thinking 参数并逐层透传
+  4. agent/loop.py             +62/-7   ① run() 新增 on_thinking 参数并逐层透传
                                        【与 2 必须配对】
+                                       ② 有效上下文改为读 numCtx（修故障 7）；
+                                          压缩比例 compactRatio / compactTargetRatio
+                                          可由 config.agent 覆盖（默认 0.75 / 0.5）
   5. agent/context.py          +17/-1   强制"思考/回复跟随用户语言"；支持
                                        systemPrompt 里的 {{CURRENT_DATE}} /
                                        {{CURRENT_TIME}} 占位替换

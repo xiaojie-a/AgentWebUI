@@ -154,11 +154,11 @@
       <div class="modal-body">
         <div id="ctxDetail">读取中…</div>
         <div class="ctx-row">
-          <span class="ctx-lbl">上下文最大值</span>
+          <span class="ctx-lbl">窗口上限 numCtx</span>
           <input type="range" id="ctxMaxRange" min="1024" max="65536" step="1024">
           <span class="ctx-val" id="ctxMaxVal">8192</span><span class="ctx-unit">tokens</span>
         </div>
-        <p class="ctx-note">用量按会话文本长度估算（非模型精确计数）。拖动滑块调整最大值，写入配置后下一条消息生效。</p>
+        <p class="ctx-note">该值同时是后端 agent-mini 的<b>有效上下文</b>：会话用量达到「有效上下文 × 压缩比例（默认 75%）」时自动摘要压缩历史。拖动滑块松手即写入配置，<b>下一条消息生效，无需重启</b>。用量按会话文本长度估算，非模型精确计数。</p>
       </div>
     </div>
   </div>

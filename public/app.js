@@ -44,7 +44,8 @@
   function currentConv() { return conversations.find((c) => c.id === currentId) || null; }
 
   // ---------- 上下文用量（发送键旁圆环 + 详情弹窗） ----------
-  let ctxMax = 8192;          // 上下文上限（默认 8192；读 config numCtx 覆盖）
+  let ctxMax = 8192;          // numCtx：模型窗口上限，同时也是后端"有效上下文"（读 config numCtx 覆盖）
+  let ctxCompactRatio = 0.75; // 压缩触发比例：达到 ctxMax × 该比例即摘要压缩（读 config agent.compactRatio 覆盖）
   let cfgProvider = "ollama";
   let cfgModel = "";
   const CTX_RING_C = 2 * Math.PI * 15.5;   // 圆环周长（r=15.5）
@@ -187,6 +188,8 @@
         ctxMaxRange.value = n;
         ctxMaxVal.textContent = n.toLocaleString();
       }
+      const cr = cfg && parseFloat(cfg.compactRatio);
+      if (cr && cr > 0 && cr <= 1) ctxCompactRatio = cr;
     } catch { /* 后端未就绪：保留默认值 */ }
     updateCtxRing();
   }
@@ -214,6 +217,8 @@
     ctxDetail.innerHTML =
       `<div class="info-row"><span>已用上下文</span><b>${used.toLocaleString()} tokens${hasReal ? ' <small style="color:#4ade80">(精确)</small>' : ' <small style="color:#fbbf24">(估算)</small>'}</b></div>` +
       `<div class="info-row"><span>占用率</span><b>${Math.round(pct * 100)}%</b></div>` +
+      `<div class="info-row"><span>有效上下文</span><b><span data-ctx-eff>${ctxMax.toLocaleString()} tokens</span> <small style="color:#94a3b8">(= numCtx)</small></b></div>` +
+      `<div class="info-row"><span>压缩阈值</span><b><span data-ctx-thr>${Math.round(ctxMax * ctxCompactRatio).toLocaleString()} tokens</span> <small style="color:#94a3b8">(${Math.round(ctxCompactRatio * 100)}% 触发摘要压缩)</small></b></div>` +
       stackedHtml +
       (hasReal ? `<div class="info-row"><span>粗略估算</span><b style="color:#94a3b8">${estimated.toLocaleString()} tokens</b></div>` : "") +
       (completionTokens > 0 ? `<div class="info-row"><span>本轮生成</span><b>${completionTokens.toLocaleString()} tokens</b></div>` : "") +
@@ -225,22 +230,33 @@
     ctxMaxVal.textContent = ctxMax.toLocaleString();
     ctxModal.hidden = false;
   }
+  // 联动刷新"有效上下文 / 压缩阈值"两行（拖动滑杆时实时预览）
+  function updateCtxBudgetRows() {
+    if (!ctxDetail) return;
+    const eff = ctxDetail.querySelector("[data-ctx-eff]");
+    if (eff) eff.textContent = ctxMax.toLocaleString() + " tokens";
+    const thr = ctxDetail.querySelector("[data-ctx-thr]");
+    if (thr) thr.textContent = Math.round(ctxMax * ctxCompactRatio).toLocaleString() + " tokens";
+  }
   ctxRing && (ctxRing.onclick = openCtxModal);
   closeCtx && (closeCtx.onclick = () => { if (ctxModal) ctxModal.hidden = true; });
   ctxModal && (ctxModal.onclick = (e) => { if (e.target === ctxModal) ctxModal.hidden = true; });
   if (ctxMaxRange) {
     ctxMaxRange.addEventListener("input", () => {
       const v = Number(ctxMaxRange.value);
+      ctxMax = v;
       ctxMaxVal.textContent = v.toLocaleString();
-      // 即时预览：按新上限刷新圆环
+      // 即时预览：按新上限刷新圆环 + 联动行（压缩阈值 = 新上限 × 比例）
       const used = convUsedTokens(currentConv());
       const p = v > 0 ? used / v : 0;
       ctxRingArc.style.strokeDashoffset = String(CTX_RING_C * (1 - Math.min(1, Math.max(0, p))));
+      updateCtxBudgetRows();
     });
     ctxMaxRange.addEventListener("change", async () => {
       const v = Number(ctxMaxRange.value);
       ctxMax = v;
       ctxMaxVal.textContent = v.toLocaleString();
+      updateCtxBudgetRows();
       try {
         const r = await fetch("/api/config", {
           method: "POST",

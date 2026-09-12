@@ -641,6 +641,9 @@ function readConfig() {
 }
 
 // ============ 获取信息 ============
+// numCtx 现在同时是后端 agent-mini 的"有效上下文"（触发压缩的基准）：
+// AgentLoop 优先读 config.providers.<name>.numCtx，压缩阈值 = numCtx * compactRatio。
+// 这里顺带把推导结果透出，前端"上下文用量"弹窗可直接展示联动值。
 app.get('/info', (req, res) => {
     try {
         const config = readConfig();
@@ -654,9 +657,21 @@ app.get('/info', (req, res) => {
             const n = parseInt(prov.numCtx, 10);
             if (n && n > 0) numCtx = n;
         }
-        res.json({ provider, model, numCtx, backend: agentBackend() });
+        const r = parseFloat((config && config.agent || {}).compactRatio);
+        const compactRatio = (r > 0 && r <= 1) ? r : 0.75;
+        res.json({
+            provider, model, numCtx,
+            compactRatio,
+            effectiveCtx: numCtx,
+            compactThreshold: Math.round(numCtx * compactRatio),
+            backend: agentBackend(),
+        });
     } catch (err) {
-        res.json({ provider: 'unknown', model: 'unknown', numCtx: 8192, backend: agentBackend() });
+        res.json({
+            provider: 'unknown', model: 'unknown', numCtx: 8192,
+            compactRatio: 0.75, effectiveCtx: 8192, compactThreshold: 6144,
+            backend: agentBackend(),
+        });
     }
 });
 

@@ -88,6 +88,37 @@ patch 在流式 chunk 循环里记录 `prompt_eval_count` / `eval_count`（ollam
 
 > 这一条与 1️⃣ 无关——缺它不会崩，只是前端静默退回估算值。但 **`agent_bridge.js` / `public/app.js` 已带 `[精确Token]` 逻辑，装旧包就会看到假数字**。
 
+**7️⃣ "有效上下文 / 压缩阈值"被钉死在模型档位，跟 numCtx 脱钩**
+
+官方 `agent/token_estimator.py` 把"有效上下文"按模型档位写死：
+`tiny=3000 / small=6000 / medium=12000 / cloud=32000`；
+`agent/loop.py` 在会话用量超过 `有效上下文 × 0.75` 时触发摘要压缩（压缩目标 `× 0.5`）。
+
+后果：**前端滑杆把 `numCtx` 调到 35840，压缩仍然在 6000×0.75=4500 就触发**——UI 上"窗口上限"是假的，实际可用上下文和配的完全无关。
+
+patch 让 `AgentLoop` 优先读取 `config.providers.<当前 provider>.numCtx` 作为有效上下文（读不到才回退档位默认值），并把压缩比例抽成可配：
+
+```jsonc
+// ~/.agent-mini/config.json
+{
+  "providers": { "ollama": { "model": "qwen3:8b", "numCtx": 8192 } },
+  "agent": {
+    "maxIterations": 50,
+    "compactRatio": 0.75,        // 可选：达到 numCtx×此值触发摘要（默认 0.75）
+    "compactTargetRatio": 0.5    // 可选：压缩后目标水位（默认 0.5）
+  }
+}
+```
+
+联动方向：**前端「上下文用量」弹窗滑杆 → `POST /api/config` → `config.numCtx` → 后端下一条消息生效**（bridge 每个任务都重新 `load_config()` 建 `AgentLoop`，**不用重启服务**）。弹窗里会同步显示推导出的「有效上下文」与「压缩阈值」。
+
+| numCtx | 有效上下文 | 压缩阈值（0.75） |
+|---|---|---|
+| 5120 | 5120 | 3840 |
+| 8192 | 8192 | 6144 |
+| 35840 | 35840 | 26880 |
+| 未设置 | 按档位（8B→6000） | 4500 |
+
 ### 相对官方 0.3.1 的改动（共 7 个文件）
 
 | 文件 | 改动 | 说明 |
@@ -95,7 +126,7 @@ patch 在流式 chunk 循环里记录 `prompt_eval_count` / `eval_count`（ollam
 | `config.py` | +3/-3 | `open()` 显式 `encoding="utf-8"`；`save_config` 用 `ensure_ascii=False`（修上面 2️⃣） |
 | `providers/ollama.py` | +126/-11 | ①增量剥离 `<think>`（标签可跨 chunk 分片，带状态机）+ `on_thinking` 回调（约 160 字合批）+ 显式传递 `numCtx`（修 3️⃣4️⃣）；②**流式路径提取真实 `usage`**（修 6️⃣） |
 | `providers/__init__.py` | +1 | `create_provider` 向 `OllamaProvider` 透传 `numCtx` |
-| `agent/loop.py` | +4/-2 | **`run()` 新增 `on_thinking` 参数并逐层透传（修 1️⃣，bridge 硬依赖）** |
+| `agent/loop.py` | +62/-7 | ①**`run()` 新增 `on_thinking` 参数并逐层透传（修 1️⃣，bridge 硬依赖）**；②**有效上下文改为读 `numCtx` + 压缩比例可配（修 7️⃣）** |
 | `agent/context.py` | +17/-1 | 强制"思考/回复跟随用户语言"；支持 `systemPrompt` 中的 `{{CURRENT_DATE}}` / `{{CURRENT_TIME}}` 占位替换 |
 | `agent/tools.py` | +152/-132 | 搜索后端由 DuckDuckGo 换为 Bing CN / Sogou / Baidu（修 5️⃣，国内可达） |
 | `cli.py` | +1/-1 | `--tools` 帮助文案 |
@@ -123,6 +154,15 @@ print('OK 带精确Token' if 'prompt_eval_count' in s and 'usage=_usage' in s el
 
 想跑真实推理验证全链路：`agent-mini-patch/verify_precise_token.py`
 （A：直接调 `provider.chat_stream` 看 `usage`；B：走 `/chat` → `/task/<id>/state` 看 `last_prompt_tokens`；两条都 PASS 才算通）。
+
+再查 7️⃣ 的"有效上下文是否跟随 numCtx"（不需要 ollama 在跑）：
+
+```bash
+python agent-mini-patch/verify_numctx_linkage.py
+```
+
+会打印一组「配置 numCtx → 实际生效的有效上下文 / 压缩阈值」对照；
+若 `numCtx=35840` 那行显示 `6000 / 4500`，说明装的还是旧包。
 
 ### 从源码重建 / 回滚
 
