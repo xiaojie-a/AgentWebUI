@@ -9,7 +9,7 @@
     sendBtn = $("sendBtn"), topbarTitle = $("topbarTitle"), modelBadge = $("modelBadge"),
     assistantName = $("assistantName"),
     settingsModal = $("settingsModal"),
-    ctxRing = $("ctxRing"), ctxRingArc = $("ctxRingArc"),
+    ctxRing = $("ctxRing"), ctxRingArc = $("ctxRingArc"), ctxCompacted = $("ctxCompacted"),
     ctxModal = $("ctxModal"), ctxDetail = $("ctxDetail"),
     ctxMaxRange = $("ctxMaxRange"), ctxMaxVal = $("ctxMaxVal"), closeCtx = $("closeCtx");
 
@@ -62,6 +62,10 @@
       for (let i = conv.messages.length - 1; i >= 0; i--) {
         const m = conv.messages[i];
         if (m.role === "assistant" && m.usage && m.usage.last_prompt_tokens > 0) {
+          // [压缩感知] 若本轮触发过压缩，直接返回压缩后的量；
+          // 否则圆环会一直停在压缩前的高占用，要等下一轮才回落。
+          const cp = m.usage.compaction;
+          if (cp && cp.post_prompt_tokens > 0) return cp.post_prompt_tokens;
           return m.usage.last_prompt_tokens;
         }
       }
@@ -166,16 +170,35 @@
       if (oldBreakdown) oldBreakdown.replaceWith(tmp.querySelector(".ctx-breakdown"));
     }
   }
+  // [压缩感知] 只认「最近一轮」的压缩记录，与 convUsedTokens() 口径一致；
+  // 若往前扫"第一条带 compaction 的消息"，早轮压缩过就会让徽标一直亮着。
+  function lastCompactionInfo(conv) {
+    if (!conv || !conv.messages) return null;
+    for (let i = conv.messages.length - 1; i >= 0; i--) {
+      const m = conv.messages[i];
+      if (!m || m.role !== "assistant") continue;
+      return (m.usage && m.usage.compaction) ? m.usage.compaction : null;
+    }
+    return null;
+  }
   function updateCtxRing() {
     if (!ctxRing || !ctxRingArc) return;
     const used = convUsedTokens(currentConv());
+    const _cp = lastCompactionInfo(currentConv());
     const pct = ctxMax > 0 ? used / ctxMax : 0;
     const p = Math.min(1, Math.max(0, pct));
     ctxRingArc.style.strokeDasharray = String(CTX_RING_C);
     ctxRingArc.style.strokeDashoffset = String(CTX_RING_C * (1 - p));
     ctxRingArc.classList.toggle("warn", p > 0.8 && p <= 0.95);
     ctxRingArc.classList.toggle("danger", p > 0.95);
-    ctxRing.title = `上下文 ${used.toLocaleString()} / ${ctxMax.toLocaleString()} tokens（约 ${Math.round(p * 100)}%）`;
+    ctxRing.title = `上下文 ${used.toLocaleString()} / ${ctxMax.toLocaleString()} tokens（约 ${Math.round(p * 100)}%）`
+      + (_cp ? `　·　本轮已压缩：${(_cp.trigger_tokens || 0).toLocaleString()} → ${(_cp.post_prompt_tokens || 0).toLocaleString()} tokens` : "");
+    if (ctxCompacted) {
+      ctxCompacted.hidden = !_cp;
+      ctxCompacted.title = _cp
+        ? `本轮触发上下文压缩：丢弃 ${(_cp.dropped_tokens || 0).toLocaleString()} tokens（${_cp.summarized_messages || 0} 条消息摘要成 1 条）`
+        : "";
+    }
   }
   async function loadCtxConfig() {
     try {
@@ -192,6 +215,17 @@
       if (cr && cr > 0 && cr <= 1) ctxCompactRatio = cr;
     } catch { /* 后端未就绪：保留默认值 */ }
     updateCtxRing();
+  }
+  // [压缩感知] 压缩明细行：把 before/after 摊开给用户看
+  function compactionRow(cp) {
+    if (!cp) return "";
+    const ok = cp.ok !== false;
+    if (!ok) {
+      return `<div class="info-row"><span>压缩状态</span><b style="color:#f87171">摘要生成失败：${esc(cp.reason || "未知原因")}</b></div>`;
+    }
+    return `<div class="info-row"><span>压缩状态</span><b style="color:#30a46c">本轮已压缩 ${(cp.trigger_tokens || 0).toLocaleString()} → ${(cp.post_prompt_tokens || 0).toLocaleString()} tokens</b></div>` +
+      `<div class="info-row"><span>摘要范围</span><b>最早 ${cp.summarized_messages || 0} 条 → 1 条摘要（保留最近 ${cp.kept_messages || 0} 条）</b></div>` +
+      `<div class="info-row"><span>丢弃 / 摘要</span><b style="color:#94a3b8">−${(cp.dropped_tokens || 0).toLocaleString()} / +${(cp.summary_tokens || 0).toLocaleString()} tokens</b></div>`;
   }
   function openCtxModal() {
     if (!ctxModal) return;
@@ -210,15 +244,17 @@
     }
     const lastMsg = conv && conv.messages.length ? conv.messages[conv.messages.length-1] : null;
     const lastUsage = lastMsg && lastMsg.role === "assistant" ? lastMsg.usage : null;
+    const cpInfo = lastUsage && lastUsage.compaction ? lastUsage.compaction : null;
     const completionTokens = lastUsage && lastUsage.completion_tokens ? lastUsage.completion_tokens : 0;
     const totalTokens = lastUsage && lastUsage.total_tokens ? lastUsage.total_tokens : 0;
     const stackedHtml = renderStackedBar(byType, used, hasReal, completionTokens);
 
     ctxDetail.innerHTML =
-      `<div class="info-row"><span>已用上下文</span><b>${used.toLocaleString()} tokens${hasReal ? ' <small style="color:#4ade80">(精确)</small>' : ' <small style="color:#fbbf24">(估算)</small>'}</b></div>` +
+      `<div class="info-row"><span>已用上下文</span><b>${used.toLocaleString()} tokens${cpInfo ? ' <small style="color:#30a46c">(压缩后估算)</small>' : (hasReal ? ' <small style="color:#4ade80">(精确)</small>' : ' <small style="color:#fbbf24">(估算)</small>')}</b></div>` +
       `<div class="info-row"><span>占用率</span><b>${Math.round(pct * 100)}%</b></div>` +
       `<div class="info-row"><span>有效上下文</span><b><span data-ctx-eff>${ctxMax.toLocaleString()} tokens</span> <small style="color:#94a3b8">(= numCtx)</small></b></div>` +
       `<div class="info-row"><span>压缩阈值</span><b><span data-ctx-thr>${Math.round(ctxMax * ctxCompactRatio).toLocaleString()} tokens</span> <small style="color:#94a3b8">(${Math.round(ctxCompactRatio * 100)}% 触发摘要压缩)</small></b></div>` +
+      compactionRow(cpInfo) +
       stackedHtml +
       (hasReal ? `<div class="info-row"><span>粗略估算</span><b style="color:#94a3b8">${estimated.toLocaleString()} tokens</b></div>` : "") +
       (completionTokens > 0 ? `<div class="info-row"><span>本轮生成</span><b>${completionTokens.toLocaleString()} tokens</b></div>` : "") +
@@ -657,7 +693,7 @@
               ctx.statusTip = `⏳ 模型响应较慢，请稍候…（已等待 ${data.silent_seconds || 0} 秒）`;
               if (ctx.syncTip) ctx.syncTip();
             }
-            if (data.done) { if (ctx.setCursor) ctx.setCursor(false); ctx.normalDone = true; ctx.usage = data.usage || null; ctx.last_prompt_tokens = data.last_prompt_tokens || 0; return; }
+            if (data.done) { if (ctx.setCursor) ctx.setCursor(false); ctx.normalDone = true; ctx.usage = data.usage || null; ctx.last_prompt_tokens = data.last_prompt_tokens || 0; ctx.compaction = data.compaction || null; return; }
             if (data.cancelled) { if (ctx.setCursor) ctx.setCursor(false); return; }
             if (data.error) { if (ctx.setCursor) ctx.setCursor(false); throw new Error(data.error); }
           }
@@ -702,7 +738,7 @@
     abortCtrl = new AbortController();
     // 有序渲染节点：{type:"text", value} | {type:"tool", tool}
     // 流式过程增量更新（不重建 DOM、不重触发动画），工具卡片按到达顺序插入，不再固定堆在文本上方
-    const ctx = { full: "", tools: [], reasoning: "", nodes: [], nodeEls: [], statusTip: TIP_WAIT, phase: "wait", normalDone: false, eventIndex: 0, textShown: 0, drainTimer: null, pendingDone: false, usage: null, last_prompt_tokens: 0, liveTokens: { reasoning: 0, content: 0, tool: 0 } };
+    const ctx = { full: "", tools: [], reasoning: "", nodes: [], nodeEls: [], statusTip: TIP_WAIT, phase: "wait", normalDone: false, eventIndex: 0, textShown: 0, drainTimer: null, pendingDone: false, usage: null, last_prompt_tokens: 0, compaction: null, liveTokens: { reasoning: 0, content: 0, tool: 0 } };
     bubble.innerHTML = `<div class="stream-body"></div>`;
     const bodyEl = bubble.firstElementChild;
     const tipEl = document.createElement("div");
@@ -991,7 +1027,7 @@
           content: ctx.full,
           tools: ctx.tools.length ? ctx.tools : undefined,
           reasoning: ctx.reasoning || undefined,
-          usage: ctx.usage ? { ...ctx.usage, last_prompt_tokens: ctx.last_prompt_tokens || 0 } : undefined,
+          usage: ctx.usage ? { ...ctx.usage, last_prompt_tokens: ctx.last_prompt_tokens || 0, compaction: ctx.compaction || undefined } : undefined,
         });
         saveConvs();
       }
@@ -1038,7 +1074,7 @@
             content,
             tools: st.tools && st.tools.length ? st.tools : undefined,
             reasoning: st.reasoning || undefined,
-            usage: st.usage ? { ...st.usage, last_prompt_tokens: st.last_prompt_tokens || 0 } : undefined,
+            usage: st.usage ? { ...st.usage, last_prompt_tokens: st.last_prompt_tokens || 0, compaction: st.compaction || undefined } : undefined,
           });
           saveConvs();
         }
@@ -1049,7 +1085,7 @@
       return;
     }
 
-    const ctx = { full: st.content || "", tools: st.tools || [], reasoning: st.reasoning || "", nodes: [], nodeEls: [], statusTip: "", phase: "wait", normalDone: false, eventIndex: st.event_count || 0, textShown: 0, drainTimer: null, pendingDone: false, usage: st.usage || null, last_prompt_tokens: st.last_prompt_tokens || 0, liveTokens: { reasoning: 0, content: 0, tool: 0 } };
+    const ctx = { full: st.content || "", tools: st.tools || [], reasoning: st.reasoning || "", nodes: [], nodeEls: [], statusTip: "", phase: "wait", normalDone: false, eventIndex: st.event_count || 0, textShown: 0, drainTimer: null, pendingDone: false, usage: st.usage || null, last_prompt_tokens: st.last_prompt_tokens || 0, compaction: st.compaction || null, liveTokens: { reasoning: 0, content: 0, tool: 0 } };
     let bubble = null;
     let bodyEl = null;
     let tipEl = null;
@@ -1294,7 +1330,7 @@
           content: ctx.full,
           tools: ctx.tools.length ? ctx.tools : undefined,
           reasoning: ctx.reasoning || undefined,
-          usage: ctx.usage ? { ...ctx.usage, last_prompt_tokens: ctx.last_prompt_tokens || 0 } : undefined,
+          usage: ctx.usage ? { ...ctx.usage, last_prompt_tokens: ctx.last_prompt_tokens || 0, compaction: ctx.compaction || undefined } : undefined,
         });
         saveConvs();
       }
@@ -1413,6 +1449,68 @@
   };
 
   // 设置（展示 agent-mini 当前配置；2026-09-07 起引擎固定 agent-mini，EffGen 已移除）
+  // ---------- 深度思考开关 ----------
+  // 读 config.providers.<p>.think：true = 强制开启，false = 强制跳过思考（更快），
+  // 缺省 = 跟随模型默认。写入走 POST /api/config → bridge 落盘 config.json；
+  // 每个 agent 任务都是新的 python 子进程读配置，所以下一条消息即生效、无需重启。
+  function thinkGroupHtml(cfg) {
+    const t = cfg.think;
+    const explicit = (t === true || t === false);
+    const unsupported = cfg.thinkSupported === false;
+    // 未显式设置时按"思考模型默认开"展示；模型不支持思考则一律显示为关
+    const on = unsupported ? false : (explicit ? t : true);
+    const stateTxt = unsupported
+      ? "当前模型不支持思考"
+      : (explicit ? (t ? "已强制开启" : "已强制关闭（更快）") : "跟随模型默认");
+    return `<div class="set-group">
+        <div class="set-row">
+          <div class="set-txt">
+            <b>深度思考</b>
+            <small>关闭后跳过思考直接作答，弱机器上明显更快；注意 qwen3 关闭思考后工具调用可靠性会下降</small>
+          </div>
+          <button class="switch${on ? " on" : ""}${explicit ? "" : " auto"}"
+                  id="thinkSwitch" role="switch" aria-checked="${on}"
+                  ${unsupported ? "disabled" : ""} title="${stateTxt}"><i></i></button>
+        </div>
+        <div class="set-hint">当前：<b>${stateTxt}</b>${explicit ? ` · <a href="#" id="thinkReset">恢复模型默认</a>` : ""} · 下一条消息生效，无需重启</div>
+      </div>`;
+  }
+  function bindThinkSwitch(cfg) {
+    const sw = $("thinkSwitch");
+    if (sw) sw.onclick = async () => {
+      const next = !sw.classList.contains("on");
+      sw.disabled = true;
+      try {
+        const r = await fetch("/api/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ provider: cfg.provider, think: next }),
+        });
+        const d = await r.json();
+        if (!r.ok || !d.ok) throw new Error((d && d.error) || ("HTTP " + r.status));
+        console.log(`[Think] 深度思考 -> ${next ? "开启" : "关闭"}`);
+        $("settingsBtn").onclick();   // 重渲染，刷新"当前：…"状态行
+      } catch (e) {
+        console.warn("深度思考保存失败:", e.message);
+        sw.disabled = false;
+      }
+    };
+    const rs = $("thinkReset");
+    if (rs) rs.onclick = async (ev) => {
+      ev.preventDefault();
+      try {
+        const r = await fetch("/api/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ provider: cfg.provider, think: "auto" }),
+        });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        console.log("[Think] 深度思考 -> 跟随模型默认");
+        $("settingsBtn").onclick();
+      } catch (e) { console.warn("深度思考保存失败:", e.message); }
+    };
+  }
+
   $("settingsBtn").onclick = async () => {
     settingsModal.hidden = false;
     const body = $("settingsInfo");
@@ -1421,13 +1519,15 @@
       const cfg = await (await fetch("/api/config")).json();
       assistantName.textContent = "agent-mini";
       body.innerHTML = cfg.bridge
-        ? `<div class="info-row"><span>Provider</span><b>${esc(cfg.provider)}</b></div>
+        ? thinkGroupHtml(cfg) +
+          `<div class="info-row"><span>Provider</span><b>${esc(cfg.provider)}</b></div>
            <div class="info-row"><span>模型</span><b>${esc(cfg.model)}</b></div>
            <div class="info-row"><span>引擎</span><b>agent-mini</b></div>
            <div class="info-row"><span>桥接服务</span><b class="ok">已连接</b></div>
            <p class="info-tip">切换模型后，下一条消息自动生效（无需重启）</p>`
         : `<div class="info-row"><span>桥接服务</span><b class="err">未连接</b></div>
            <p class="info-tip">请先启动：<br><code>agent-mini venv 的 python.exe agent_bridge.py</code></p>`;
+      if (cfg.bridge) bindThinkSwitch(cfg);
     } catch {
       body.innerHTML = `<div class="info-row"><span>状态</span><b class="err">后端不可达</b></div>`;
     }

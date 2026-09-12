@@ -469,6 +469,8 @@ async def main():
         # turn_usage 是累加值（多轮工具调用会重复计算历史），
         # 而最后一次调用的 prompt_tokens 才是当前会话的真实上下文用量。
         _last_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        # [AgentWebUI patch] 本轮全部 LLM 调用的用量日志（含压缩用的摘要调用），仅用于兜底/诊断
+        _usage_log = []
         class _UsageTracker:
             def __init__(self, inner):
                 self._inner = inner
@@ -480,13 +482,17 @@ async def main():
                 return self._inner.model_name
             async def chat(self, messages, tools=None, temperature=0.7):
                 resp = await self._inner.chat(messages, tools=tools, temperature=temperature)
+                # [AgentWebUI patch] 非流式调用只进日志、**不覆盖** _last_usage：
+                # 上下文压缩的摘要总结走的正是 chat()，覆盖会让前端在压缩轮显示
+                # "摘要请求"的 token 数（与当前上下文占用无关的错值）。
                 if getattr(resp, "usage", None):
-                    _last_usage.update(resp.usage)
+                    _usage_log.append({"kind": "chat", **resp.usage})
                 return resp
             async def chat_stream(self, messages, on_delta, tools=None, temperature=0.7, on_thinking=None):
                 resp = await self._inner.chat_stream(messages, on_delta, tools=tools, temperature=temperature, on_thinking=on_thinking)
                 if getattr(resp, "usage", None):
                     _last_usage.update(resp.usage)
+                    _usage_log.append({"kind": "chat_stream", **resp.usage})
                 return resp
             async def close(self):
                 await self._inner.close()
@@ -531,7 +537,27 @@ async def main():
         if isinstance(result, str) and (result.startswith("Error") or result.startswith("Reached maximum")):
             emit({"error": result})
         else:
-            emit({"done": True, "usage": agent.turn_usage, "last_prompt_tokens": _last_usage["prompt_tokens"]})
+            # [AgentWebUI patch] 主调用的 prompt_tokens；极端情况（本轮主调用没走
+            # chat_stream）退回本轮第一次调用的值，避免退化成 0。
+            _prompt_tokens = _last_usage["prompt_tokens"] or (_usage_log[0]["prompt_tokens"] if _usage_log else 0)
+            _payload = {"done": True, "usage": agent.turn_usage, "last_prompt_tokens": _prompt_tokens}
+            # [AgentWebUI patch] 压缩信息：前端据此显示"压缩后占比"与压缩明细
+            _comp = getattr(agent, "last_compaction", None)
+            if _comp:
+                _comp = dict(_comp)
+                # 压缩后 prompt 估算：先在"估算器尺度"上做加减，再用 k = 真实/估算
+                # 折算回真实 token 尺度。k≈1（常规英文文本）时即退化为简单加减；
+                # 直接拿真实 prompt_tokens 减估算器的 dropped_tokens 会量纲不一
+                # （实测出现过 post 被夹成 0）。est_all 含系统提示——它压缩后仍在。
+                _est_all = _comp.get("prompt_est_tokens") or 0
+                _est_after = max(
+                    0, _est_all - _comp.get("dropped_tokens", 0) + _comp.get("summary_tokens", 0)
+                )
+                _k = (_prompt_tokens / _est_all) if (_est_all > 0 and _prompt_tokens > 0) else 1.0
+                _comp["post_prompt_tokens"] = int(round(_est_after * _k))
+                _comp["scale"] = round(_k, 3)
+                _payload["compaction"] = _comp
+            emit(_payload)
 
         await agent.close()
 
@@ -590,6 +616,7 @@ asyncio.run(main())
         const doneEvent = task.events.filter(e => e.done).pop();
         const usage = doneEvent && doneEvent.usage ? doneEvent.usage : null;
         const last_prompt_tokens = doneEvent && doneEvent.last_prompt_tokens ? doneEvent.last_prompt_tokens : 0;
+        const compaction = doneEvent && doneEvent.compaction ? doneEvent.compaction : null;
 
         return {
             task_id: task.id,
@@ -598,7 +625,8 @@ asyncio.run(main())
             tools: tools,
             event_count: task.events.length,
             usage: usage,
-            last_prompt_tokens: last_prompt_tokens
+            last_prompt_tokens: last_prompt_tokens,
+            compaction: compaction
         };
     }
 }
@@ -644,32 +672,56 @@ function readConfig() {
 // numCtx 现在同时是后端 agent-mini 的"有效上下文"（触发压缩的基准）：
 // AgentLoop 优先读 config.providers.<name>.numCtx，压缩阈值 = numCtx * compactRatio。
 // 这里顺带把推导结果透出，前端"上下文用量"弹窗可直接展示联动值。
-app.get('/info', (req, res) => {
+app.get('/info', async (req, res) => {
     try {
         const config = readConfig();
         let provider = 'ollama';
         let model = '?';
         let numCtx = 8192;
+        // [AgentWebUI patch] 深度思考开关：true/false 为显式设置；null = 未设置，跟随模型默认
+        let think = null;
         if (config) {
             provider = config.provider || 'ollama';
             const prov = (config.providers || {})[provider] || {};
             model = prov.model || '?';
             const n = parseInt(prov.numCtx, 10);
             if (n && n > 0) numCtx = n;
+            if (prov.think === true || prov.think === false) think = prov.think;
+            else if (prov.think === 'true' || prov.think === 'false') think = (prov.think === 'true');
         }
         const r = parseFloat((config && config.agent || {}).compactRatio);
         const compactRatio = (r > 0 && r <= 1) ? r : 0.75;
+        // [AgentWebUI patch] 探测当前模型是否有 thinking 能力（ollama /api/tags 的 capabilities）。
+        // 不支持时前端把开关置灰，避免"打开了却没效果"。null = 探测不到（ollama 不可达）。
+        let thinkSupported = null;
+        if (provider === 'ollama') {
+            try {
+                const oCfg = (config && (config.providers || {}).ollama) || {};
+                const oUrl = String(oCfg.baseUrl || 'http://127.0.0.1:11434').replace(/\/+$/, '');
+                const t = await fetch(oUrl + '/api/tags', { signal: AbortSignal.timeout(2500) });
+                if (t.ok) {
+                    const tags = await t.json();
+                    const hit = (Array.isArray(tags && tags.models) ? tags.models : [])
+                        .find(m => String((m && m.name) || '') === model);
+                    thinkSupported = hit
+                        ? (Array.isArray(hit.capabilities) ? hit.capabilities : []).includes('thinking')
+                        : false;
+                }
+            } catch (e) { /* ollama 不可达：保持 null */ }
+        }
         res.json({
             provider, model, numCtx,
             compactRatio,
             effectiveCtx: numCtx,
             compactThreshold: Math.round(numCtx * compactRatio),
+            think, thinkSupported,
             backend: agentBackend(),
         });
     } catch (err) {
         res.json({
             provider: 'unknown', model: 'unknown', numCtx: 8192,
             compactRatio: 0.75, effectiveCtx: 8192, compactThreshold: 6144,
+            think: null, thinkSupported: null,
             backend: agentBackend(),
         });
     }
@@ -745,7 +797,7 @@ app.get('/models', async (req, res) => {
 //   3) 两者同时 —— 先切后端再切模型
 app.post('/config', (req, res) => {
     try {
-        const { provider, model, backend, numCtx } = req.body || {};
+        const { provider, model, backend, numCtx, think } = req.body || {};
         const config = readConfig();
         if (!config) {
             return res.status(500).json({ error: '配置文件不存在或无法读取' });
@@ -785,13 +837,36 @@ app.post('/config', (req, res) => {
             }
         }
 
+        // [AgentWebUI patch] 深度思考开关 think：写入对应 provider。
+        //   true / false  -> 显式覆盖（agent-mini 会带进 ollama /api/chat 的 "think"）
+        //   "auto"        -> 删除该键，交回模型默认（qwen3 等思考模型默认开启）
+        if (think !== undefined && think !== null) {
+            const target = (provider && providers[provider]) ? provider : config.provider;
+            providers[target] = providers[target] || {};
+            let val;
+            if (think === 'auto') val = 'auto';
+            else if (think === true || think === false) val = think;
+            else if (think === 'true' || think === 'false') val = (think === 'true');
+            else return res.status(400).json({ error: `think 只能是 true / false / "auto"，收到 ${JSON.stringify(think)}` });
+
+            if (val === 'auto') {
+                delete providers[target].think;
+                console.log(`[Config] ${target} 深度思考 -> 跟随模型默认`);
+            } else {
+                providers[target].think = val;
+                console.log(`[Config] ${target} 深度思考 -> ${val ? '开启' : '关闭'}`);
+            }
+        }
+
         // 写回
         const configPath = getConfigPath();
         fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
         const newModel = (providers[config.provider] && providers[config.provider].model) || '?';
         const newNumCtx = parseInt(providers[config.provider] && providers[config.provider].numCtx, 10) || 8192;
+        const _pt = (providers[config.provider] || {}).think;
+        const newThink = (_pt === true || _pt === false) ? _pt : null;
         console.log(`[Config] 模型已切换 -> ${config.provider} / ${newModel}`);
-        res.json({ ok: true, provider: config.provider, model: newModel, numCtx: newNumCtx, backend: config.backend || 'agent-mini' });
+        res.json({ ok: true, provider: config.provider, model: newModel, numCtx: newNumCtx, think: newThink, backend: config.backend || 'agent-mini' });
     } catch (err) {
         res.status(500).json({ error: `切换失败: ${err.message}` });
     }

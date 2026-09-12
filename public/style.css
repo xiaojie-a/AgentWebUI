@@ -316,6 +316,40 @@ body {
 }
 
 /* 设置信息 */
+/* ---------- 设置分组 + 开关（深度思考） ---------- */
+.set-group {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: var(--code-bg);
+}
+.set-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.set-txt { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.set-txt b { font-size: 13.5px; font-weight: 600; }
+.set-txt small { color: var(--text-2); font-size: 12px; line-height: 1.5; }
+.set-hint { margin-top: 9px; font-size: 12px; color: var(--text-2); line-height: 1.6; }
+.set-hint b { color: var(--text); }
+.set-hint a { color: var(--accent-1); text-decoration: none; }
+.set-hint a:hover { text-decoration: underline; }
+.switch {
+  position: relative; flex: 0 0 auto;
+  width: 44px; height: 24px; padding: 0;
+  border-radius: 999px; border: 1px solid var(--border);
+  background: #cfd3e0; cursor: pointer;
+  transition: background .18s ease, border-color .18s ease;
+}
+.switch i {
+  position: absolute; top: 2px; left: 2px;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .3);
+  transition: transform .18s ease;
+}
+.switch.on { background: #30a46c; border-color: #30a46c; }
+.switch.on i { transform: translateX(20px); }
+.switch.auto { background-image: repeating-linear-gradient(45deg, rgba(0, 0, 0, .10) 0 3px, transparent 3px 7px); }
+html[data-theme="dark"] .switch { background: #3a3f52; }
+html[data-theme="dark"] .switch.auto { background-image: repeating-linear-gradient(45deg, rgba(255, 255, 255, .10) 0 3px, transparent 3px 7px); }
+.switch:disabled { opacity: .45; cursor: not-allowed; }
 .info-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 4px; border-bottom: 1px solid var(--border); font-size: 13.5px; }
 .info-row span { color: var(--text-2); }
 .info-row b { font-weight: 600; }
@@ -586,7 +620,15 @@ body {
   border-radius: 50%;
   transition: background 0.2s ease;
 }
+.ctx-ring-btn { position: relative; }
 .ctx-ring-btn:hover { background: rgba(127, 127, 127, 0.12); }
+.ctx-cbadge {
+  position: absolute; top: -1px; right: -3px;
+  padding: 1px 3px; border-radius: 6px;
+  font-size: 9px; line-height: 1.2;
+  background: #30a46c; color: #fff;
+}
+
 .ctx-ring-bg { fill: none; stroke: rgba(127, 127, 127, 0.22); stroke-width: 3; }
 .ctx-ring-fg {
   fill: none; stroke: #8b6cf6; stroke-width: 3;

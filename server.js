@@ -296,6 +296,9 @@ function handleState(res, taskId) {
   const content = task.events.filter((e) => "content" in e).map((e) => e.content).join("");
   const tools = task.events.filter((e) => "tool" in e).map((e) => e.tool);
   const reasoning = task.events.filter((e) => "reasoning" in e).map((e) => e.reasoning).join(""); // 连续拼接，与 persistTask/前端一致
+  // [精确Token][压缩感知] 从 done 事件带出真实 usage 与本轮压缩信息，
+  // 让"刷新后恢复任务"这条轮询路径也能显示上下文占比与压缩结果
+  const doneEvent = task.events.filter((e) => e.done).pop();
   return sendJson(res, 200, {
     taskId,
     status: task.status,
@@ -303,6 +306,9 @@ function handleState(res, taskId) {
     tools,
     reasoning: reasoning.trim() ? reasoning : undefined,
     event_count: task.events.length,
+    usage: doneEvent && doneEvent.usage ? doneEvent.usage : undefined,
+    last_prompt_tokens: doneEvent && doneEvent.last_prompt_tokens ? doneEvent.last_prompt_tokens : 0,
+    compaction: doneEvent && doneEvent.compaction ? doneEvent.compaction : undefined,
   });
 }
 
