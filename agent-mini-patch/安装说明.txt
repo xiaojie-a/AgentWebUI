@@ -1,0 +1,127 @@
+agent-mini 定制包（AgentWebUI 专用）安装说明
+==========================================
+
+文件清单
+--------
+  agent_mini-0.3.1+agentwebui-py3-none-any.whl   已打好补丁的 agent-mini 0.3.1（纯 Python，跨平台）
+  agent-mini-0.3.1-agentwebui.patch              相对官方 0.3.1 的源码补丁（可 git apply）
+  SUMMARY.txt                                    逐文件改动统计
+
+
+为什么需要这个定制包
+--------------------
+AgentWebUI 依赖 agent-mini，但官方 0.3.1 直接配 AgentWebUI 会出问题，其中一条是硬故障：
+
+  在标准 Windows Python 上（locale 编码 = cp936/GBK），
+  官方 config.py 用 open(CONFIG_FILE) 不带 encoding 读取配置，
+  而 ~/.agent-mini/config.json 里面有中文（systemPrompt 等），
+  于是 load_config() 直接抛 UnicodeDecodeError，WebUI 起不来。
+
+  实测（PYTHONUTF8=0 模拟标准 Windows）：
+
+    官方写法  -> UnicodeDecodeError: 'gbk' codec can't decode byte 0xa1 ...
+    patch 写法 -> 读取成功且内容正确
+
+  注意：如果运行时设了 PYTHONUTF8=1（部分环境会），这个问题会被掩盖，
+  换一台机器才暴露，所以不要依赖"本机跑得通"。
+
+另外两条是功能性问题：
+
+  * 思考内容 <think>...</think> 会混进正文一起显示；
+  * 工具搜索后端用的是 DuckDuckGo，国内不可达。
+
+
+安装
+----
+    pip install agent_mini-0.3.1+agentwebui-py3-none-any.whl
+
+装进虚拟环境 / 指定目录：
+
+    python -m venv myenv
+    myenv/bin/pip install agent_mini-0.3.1+agentwebui-py3-none-any.whl
+
+离线机器：把 whl 拷过去，连同依赖一起装（依赖见官方包，主要是 httpx）。
+
+
+包含的改动（相对 PyPI 官方 0.3.1，共 7 个文件）
+----------------------------------------------
+  1. config.py                 +3/-3    open() 显式 encoding="utf-8"，
+                                       save_config 用 ensure_ascii=False
+                                       【Windows 上不加会崩，见上】
+  2. providers/ollama.py       +108/-10 增量剥离 <think>…</think>（标签可跨 chunk
+                                       分片，带状态机）；新增 on_thinking 回调
+                                       （约 160 字合批，减少前端抖动）；
+                                       显式传递 numCtx 控制上下文窗口
+  3. providers/__init__.py     +1       create_provider 向 OllamaProvider
+                                       透传 numCtx          【与 2 必须配对】
+  4. agent/loop.py             +4/-2    run() 新增 on_thinking 参数并逐层透传
+                                       【与 2 必须配对】
+  5. agent/context.py          +17/-1   强制"思考/回复跟随用户语言"；支持
+                                       systemPrompt 里的 {{CURRENT_DATE}} /
+                                       {{CURRENT_TIME}} 占位替换
+  6. agent/tools.py            +152/-132 搜索后端由 DuckDuckGo 换为
+                                       Bing CN / Sogou / Baidu（国内可达）
+  7. cli.py                    +1/-1    仅 --tools 帮助文案
+
+  重要：这 7 个文件是一个整体，不能只挑几个覆盖。
+  __init__.py 会向 ollama.py 传 num_ctx，loop.py 会向 ollama.py 传 on_thinking，
+  单独替换其一会出现 TypeError: unexpected keyword argument。
+
+
+与 AgentWebUI 的关系
+--------------------
+  agent_bridge.js 会 import agent_mini 的这几个入口：
+
+      from agent_mini.config    import load_config, MEMORY_FILE
+      from agent_mini.providers import create_provider
+      from agent_mini.agent     import AgentLoop, Memory
+      await agent.run(message, conversation, on_stream=..., on_tool_event=...)
+
+  这些在官方包里都存在，所以缺失 patch 时不会立刻报错，
+  而是以"功能缺失"或"中文配置崩溃"的形式表现。
+
+  注意：当前 bridge 并没有传 on_thinking（它靠 ollama.py 的自动 <think> 剥离
+  来保证正文干净）。on_thinking 这条通路是给 Termux / 手机版 bridge 用的，
+  有默认值 None，不传不影响。
+
+
+从源码重建（不想用 whl 时）
+--------------------------
+    pip download agent-mini==0.3.1 --no-deps -d am-dl
+    cd am-dl
+    python -c "import zipfile;zipfile.ZipFile('agent_mini-0.3.1-py3-none-any.whl').extractall('src')"
+    cd src
+    git apply -p1 ../../agent-mini-0.3.1-agentwebui.patch
+    # 然后按正常方式打包/安装
+
+  注：本机 git 若开了 core.autocrlf，apply 后行尾会变成 CRLF，不影响运行。
+
+
+校验安装是否成功
+----------------
+    python -c "import agent_mini.config as c, json, tempfile, os, pathlib; \
+    p=os.path.join(tempfile.mkdtemp(),'c.json'); \
+    open(p,'w',encoding='utf-8').write(json.dumps({'agent':{'systemPrompt':'中文测试'}},ensure_ascii=False)); \
+    c.CONFIG_FILE=pathlib.Path(p); \
+    print('OK' if c.load_config()['agent']['systemPrompt']=='中文测试' else 'FAIL')"
+
+  打印 OK 即说明中文配置读写正常。
+
+
+卸载 / 回滚到官方版
+-------------------
+    pip uninstall agent-mini
+    pip install agent-mini==0.3.1
+
+
+注意事项
+--------
+* 本包基于 **0.3.1** 重建。官方若发布新版本，需要重新对 diff 并重建，
+  不要直接把本包覆盖到新版本上（RECORD 与代码会不一致）。
+
+* agent-mini 至今没有官方插件机制，本项目对它的改动全部落在上面的 7 个文件里。
+  升级 agent-mini 后这些改动会丢失，需要重新打补丁。
+
+* 另有一处**手机专用**改动未并入本包：命中"打开/搜索/截图"等关键词却零工具调用时，
+  注入指令强制其调用 phone_control 工具（"零工具调用门禁"）。该逻辑在没有
+  phone_control 插件的机器上会误触发，因此只保留在手机端，不进入通用包。

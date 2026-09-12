@@ -1,0 +1,704 @@
+# AgentWebUI 对 agent-mini 的定制补丁
+#
+# 基准: agent_mini 0.3.1 (PyPI 官方 wheel)
+# 目标: AgentWebUI 运行时定制版
+#
+# 应用方式(解压官方 wheel 后):
+#   cd <解压目录>
+#   git apply -p1 agent-mini-0.3.1-agentwebui.patch
+# 或直接用仓库内已构建好的 wheel:
+#   pip install agent_mini-0.3.1+agentwebui-py3-none-any.whl
+#
+# 注意: 这 7 个文件是一个整体，不可只挑其中几个应用。
+#   providers/__init__.py 会向 ollama.py 传 num_ctx，
+#   agent/loop.py 会向 ollama.py 传 on_thinking，
+#   单独替换其一会出现 TypeError: unexpected keyword argument。
+#
+
+--- a/agent_mini/agent/context.py
++++ b/agent_mini/agent/context.py
+@@ -1,4 +1,10 @@
+-"""System prompt builder."""
++"""System prompt builder.
++
++[AgentWebUI patch 2026-09-07] 语言跟随：qwen/lfm 等模型在工具轮因内置英文模板 +
++<available_tools>/tools schema 全英文而切英文思考。两条 [AgentWebUI patch] 规则
++（主模板 + tiny）强制思考/回复跟随用户消息语言（中文用户即简体中文）。
++升级 agent-mini 需重打；两份拷贝（envs/agent-mini + 基础版 site-packages）都要同步。
++"""
+ 
+ from __future__ import annotations
+ 
+@@ -22,6 +28,10 @@
+ - Verify changes (read back files, run tests, check output).
+ - Be concise. Skip preamble.
+ - Use memory_store/memory_recall for user preferences and project context.
++- [AgentWebUI patch] Think and reply in the SAME language as the user's latest
++  message (Simplified Chinese when the user writes Chinese) — including the
++  reasoning between tool calls. Tool/JSON field names are technical identifiers
++  and stay as-is; English tool results should be summarized in Chinese.
+ </rules>
+ """
+ 
+@@ -33,6 +43,7 @@
+ - On tool error: read it, try a different approach.
+ - Verify changes.
+ - Be concise.
++- [AgentWebUI patch] Think and reply in the user's language (Chinese if the user writes Chinese), even between tool calls.
+ </rules>
+ """
+ 
+@@ -101,6 +112,11 @@
+     custom = config.get("agent", {}).get("systemPrompt", "")
+     if custom:
+         # Append directly — no .format() call on user-controlled content
++        # [AgentWebUI patch] 支持 {{CURRENT_DATE}} / {{CURRENT_TIME}} 占位：config 的
++        # systemPrompt 里写占位符即可拿到"本次任务的真实日期时间"（小模型对静态规则
++        # 里的日期更敏感，弥补主模板 Date 行被大段中文规则稀释的问题）。
++        custom = custom.replace("{{CURRENT_DATE}}", datetime.now().strftime("%Y-%m-%d"))
++        custom = custom.replace("{{CURRENT_TIME}}", datetime.now().strftime("%Y-%m-%d %H:%M"))
+         prompt += f"\n## User instructions\n{custom}\n"
+ 
+     n_recent = _MEMORY_BUDGET.get(tier, 5)
+--- a/agent_mini/agent/loop.py
++++ b/agent_mini/agent/loop.py
+@@ -93,6 +93,7 @@
+         conversation: list[dict],
+         on_stream: StreamEmitter | None = None,
+         on_tool_event: ToolEventCallback | None = None,
++        on_thinking=None,   # [AgentWebUI patch] 深度思考流式回调（<think> 剥离后逐段回调）
+     ) -> str:
+         """Process *user_message* and return the assistant's final text reply.
+ 
+@@ -129,7 +130,7 @@
+             pruned = self._prune_tool_results(messages)
+ 
+             response = await self._call_provider_with_retry(
+-                pruned, tool_defs, on_stream
++                pruned, tool_defs, on_stream, on_thinking
+             )
+             if isinstance(response, str):
+                 # Error string from retry exhaustion
+@@ -346,7 +347,7 @@
+         conversation.clear()
+         conversation.extend(new_conversation)
+ 
+-    async def _call_provider_with_retry(self, messages, tool_defs, on_stream):
++    async def _call_provider_with_retry(self, messages, tool_defs, on_stream, on_thinking=None):
+         """Call the provider with retry + exponential backoff (with jitter) for transient errors."""
+         max_retries = 3
+         for attempt in range(max_retries):
+@@ -357,6 +358,7 @@
+                         on_delta=on_stream,
+                         tools=tool_defs or None,
+                         temperature=self.temperature,
++                        on_thinking=on_thinking,
+                     )
+                 return await self.provider.chat(
+                     messages,
+--- a/agent_mini/agent/tools.py
++++ b/agent_mini/agent/tools.py
+@@ -12,13 +12,37 @@
+ from html import unescape
+ from html.parser import HTMLParser
+ from pathlib import Path
+-from urllib.parse import unquote, urlparse
++from urllib.parse import quote, unquote, urlparse
+ 
+ import httpx
+ 
+ from .memory import Memory
+ 
+ log = logging.getLogger("agent-mini")
++
++
++def _oem_encoding() -> str:
++    """Console/OEM codepage Windows subprocesses write in (e.g. cp936 on zh-CN)."""
++    try:
++        import ctypes
++        return "cp%d" % ctypes.windll.kernel32.GetOEMCP()
++    except Exception:
++        return "utf-8"
++
++
++def _decode_bytes(data: bytes) -> str:
++    """Decode subprocess output, tolerating Chinese in the system codepage.
++
++    On Chinese Windows, cmd.exe pipes emit GBK (cp936) bytes, not UTF-8, so a
++    naive UTF-8 decode mangles Chinese. Try UTF-8 first, fall back to the real
++    console codepage.
++    """
++    if not data:
++        return ""
++    try:
++        return data.decode("utf-8")
++    except UnicodeDecodeError:
++        return data.decode(_oem_encoding(), errors="replace")
+ 
+ # ======================================================================
+ # Tool definitions  (OpenAI function-calling format)
+@@ -119,8 +143,10 @@
+ _WEB_TOOLS: list[dict] = [
+     _tool(
+         "web_search",
+-        "Search the web via DuckDuckGo. Returns titles, URLs, snippets.",
+-        {"query": _param("Search query.")},
++        "Search the web via China-accessible engines (Bing CN / Sogou / Baidu). "
++        "Returns titles, URLs, snippets. Use for current-information lookups; "
++        "results are in Chinese when available.",
++        {"query": _param("Search query (Chinese or English).")},
+         ["query"],
+     ),
+     _tool(
+@@ -233,106 +259,120 @@
+     return unescape(re.sub(r"<[^>]+>", "", fragment)).strip()
+ 
+ 
+-def _unwrap_ddg_url(raw: str) -> str:
+-    """DuckDuckGo wraps result links in a redirect — pull out the real URL."""
+-    match = re.search(r"[?&]uddg=([^&]+)", raw)
+-    return unquote(match.group(1)) if match else unescape(raw)
+-
+-
+-def _is_external(url: str) -> bool:
+-    """True when *url* is a real result rather than a DuckDuckGo internal link."""
+-    return url.startswith("http") and "duckduckgo.com" not in url
+-
+-
+-def _parse_ddg_html(page: str) -> list[dict[str, str]]:
+-    """Parse results from the html.duckduckgo.com endpoint (div markup)."""
++def _build_bing_url(query: str) -> str:
++    """Bing (international, cc=CN) — generally reachable from mainland China
++    and returns real destination URLs (no redirect wrapper)."""
++    return "https://www.bing.com/search?q=" + quote(query) + "&cc=CN&setlang=zh-CN"
++
++
++def _build_sogou_url(query: str) -> str:
++    return "https://www.sogou.com/web?query=" + quote(query)
++
++
++def _build_baidu_url(query: str) -> str:
++    return "https://www.baidu.com/s?wd=" + quote(query) + "&rn=10"
++
++
++def _clean_title(title_html: str) -> str:
++    """Strip a result-title fragment to readable text.
++
++    Bing/Sogou often wrap the visible title in extra markup (site-domain
++    ``<div class="tit">``, citation ``<cite>``) that would otherwise glue
++    onto the title text after tag-stripping.
++    """
++    title_html = re.sub(
++        r'<div[^>]*class="[^"]*tit[^"]*"[^>]*>.*?</div>',
++        "", title_html, flags=re.DOTALL | re.IGNORECASE,
++    )
++    title_html = re.sub(
++        r"<cite[^>]*>.*?</cite>", "", title_html,
++        flags=re.DOTALL | re.IGNORECASE,
++    )
++    title = _strip_tags(title_html).strip()
++    return re.sub(r"\s+", " ", title)
++
++
++def _parse_bing(page: str) -> list[dict[str, str]]:
++    """Parse Bing results — ``<li class="b_algo">`` blocks with real URLs."""
++    results: list[dict[str, str]] = []
++    blocks = re.findall(r'<li class="b_algo"[^>]*>(.*?)</li>', page, re.DOTALL)
++    for block in blocks:
++        a = re.search(
++            r'<a[^>]*href="(https?://[^"]+)"[^>]*>(.*?)</a>', block, re.DOTALL
++        )
++        if not a:
++            continue
++        url = unescape(a.group(1))
++        title = _clean_title(a.group(2))
++        p = re.search(r'<p[^>]*>(.*?)</p>', block, re.DOTALL)
++        snippet = _strip_tags(p.group(1)) if p else ""
++        if title:
++            results.append({
++                "title": title,
++                "url": url,
++                "snippet": snippet[:300],
++            })
++    return results[:8]
++
++
++def _parse_sogou(page: str) -> list[dict[str, str]]:
++    """Parse Sogou results — links are ``/link`` redirects (followed by web_fetch)."""
++    results: list[dict[str, str]] = []
+     blocks = re.findall(
+-        r'<div[^>]*class="[^"]*result[_ ]results_links[^"]*"[^>]*>(.*?)</div>\s*</div>',
+-        page,
+-        re.DOTALL,
++        r'<div class="vrwrap[^"]*"[^>]*>(.*?)</div>\s*</div>', page, re.DOTALL
+     )
+     if not blocks:
+-        # Fallback: split on the per-result container class
+         blocks = re.findall(
+-            r'<div[^>]*class="[^"]*links_main[^"]*"[^>]*>(.*?)(?=<div[^>]*class="[^"]*links_main|$)',
+-            page,
+-            re.DOTALL,
++            r'<div class="rb"[^>]*>(.*?)</div>\s*</div>', page, re.DOTALL
+         )
+-
++    for block in blocks:
++        a = re.search(
++            r'<h3[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>', block, re.DOTALL
++        )
++        if not a:
++            continue
++        url = unescape(a.group(1))
++        title = _strip_tags(a.group(2)).strip()
++        p = re.search(r'<p[^>]*>(.*?)</p>', block, re.DOTALL)
++        snippet = _strip_tags(p.group(1)) if p else ""
++        if title:
++            results.append({
++                "title": title,
++                "url": url,
++                "snippet": snippet[:300],
++            })
++    return results[:8]
++
++
++def _parse_baidu(page: str) -> list[dict[str, str]]:
++    """Parse Baidu results — titles + ``/link`` redirects (followed by web_fetch)."""
+     results: list[dict[str, str]] = []
+-    for block in blocks:
+-        url_match = re.search(r'href="([^"]+)"', block)
+-        if not url_match:
++    chunks = re.split(r'<h3 class="t">', page)
++    for chunk in chunks[1:]:
++        a = re.search(r'<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>', chunk, re.DOTALL)
++        if not a:
+             continue
+-        url = _unwrap_ddg_url(url_match.group(1))
+-        if not _is_external(url):
+-            continue
+-
+-        title_match = re.search(
+-            r'class="[^"]*result__a[^"]*"[^>]*>(.*?)</a>', block, re.DOTALL
+-        )
+-        snippet_match = re.search(
+-            r'class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</[at]>', block, re.DOTALL
+-        )
+-        results.append({
+-            "title": _strip_tags(title_match.group(1)) if title_match else url,
+-            "url": url,
+-            "snippet": _strip_tags(snippet_match.group(1)) if snippet_match else "",
+-        })
++        url = unescape(a.group(1))
++        title = _strip_tags(a.group(2)).strip()
++        m = re.search(r'c-abstract[^>]*>(.*?)</div>', chunk[:4000], re.DOTALL)
++        snippet = _strip_tags(m.group(1)) if m else ""
++        if title:
++            results.append({
++                "title": title,
++                "url": url,
++                "snippet": snippet[:300],
++            })
+     return results[:8]
+ 
+ 
+-def _parse_ddg_lite(page: str) -> list[dict[str, str]]:
+-    """Parse results from the lite.duckduckgo.com endpoint (table markup)."""
+-    anchors = re.findall(
+-        r"<a\b([^>]*class=['\"]?result-link['\"]?[^>]*)>(.*?)</a>",
+-        page,
+-        re.DOTALL | re.IGNORECASE,
+-    )
+-    snippets = re.findall(
+-        r"class=['\"]?result-snippet['\"]?[^>]*>(.*?)</td>",
+-        page,
+-        re.DOTALL | re.IGNORECASE,
+-    )
+-
+-    results: list[dict[str, str]] = []
+-    for index, (attrs, title_html) in enumerate(anchors):
+-        href = re.search(r"href=['\"]([^'\"]+)", attrs)
+-        if not href:
+-            continue
+-        url = _unwrap_ddg_url(href.group(1))
+-        if not _is_external(url):
+-            continue
+-        results.append({
+-            "title": _strip_tags(title_html) or url,
+-            "url": url,
+-            "snippet": _strip_tags(snippets[index]) if index < len(snippets) else "",
+-        })
+-    return results[:8]
+-
+-
+-# Markers DuckDuckGo serves instead of results when it rate-limits or
+-# challenges the client (common behind corporate proxies and VPNs).
+-_DDG_BLOCK_MARKERS = (
+-    "anomaly-modal",
+-    "unfortunately, bots use duckduckgo",
+-    "detected unusual activity",
+-    "challenge-form",
+-    "please try again later",
++# Domestic search engines, tried in order. Bing returns real URLs and is
++# generally reachable from mainland China; Sogou and Baidu are fully
++# domestic and act as fallbacks when Bing is rate-limited or blocked.
++_SEARCH_ENGINES: tuple[dict, ...] = (
++    {"name": "bing-cn", "url": _build_bing_url, "parse": _parse_bing},
++    {"name": "sogou", "url": _build_sogou_url, "parse": _parse_sogou},
++    {"name": "baidu", "url": _build_baidu_url, "parse": _parse_baidu},
+ )
+-
+-# Markers that mean "the page rendered fine, the query just had no hits".
+-_DDG_EMPTY_MARKERS = ("no results", "not many great matches")
+-
+-
+-def _classify_ddg_page(page: str) -> str:
+-    """Return ``blocked``, ``empty`` or ``ok`` for a DuckDuckGo response body."""
+-    head = page[:8000].lower()
+-    if any(marker in head for marker in _DDG_BLOCK_MARKERS):
+-        return "blocked"
+-    if any(marker in head for marker in _DDG_EMPTY_MARKERS):
+-        return "empty"
+-    return "ok"
+ 
+ 
+ # ======================================================================
+@@ -343,14 +383,9 @@
+ class ToolExecutor:
+     """Execute agent tools and return results as plain strings."""
+ 
+-    _DEFAULT_BLOCKED_COMMANDS: dict[str, str] = {
+-        r"\brm\s+-[^\s]*r[^\s]*f": "destructive rm -rf",
+-        r"\bsudo\b": "sudo elevation",
+-        r"\bmkfs\b": "filesystem format",
+-        r"\bdd\s+if=": "raw disk write",
+-        r":\(\)\s*\{": "fork bomb",
+-        r"\b(chmod|chown)\s+(-R\s+)?[0-7]*\s+/[^\s]*$": "root permission change",
+-    }
++    # No built-in command blocklist — fully open by default.
++    # (Configure via tools.blockedCommands in ~/.agent-mini/config.json if needed.)
++    _DEFAULT_BLOCKED_COMMANDS: dict[str, str] = {}
+ 
+     # Tools blocked at each sandbox level
+     _READONLY_BLOCKED_TOOLS = frozenset({
+@@ -365,7 +400,8 @@
+         ).expanduser()
+         self._workspace.mkdir(parents=True, exist_ok=True)
+         self._restrict = config.get("tools", {}).get("restrictToWorkspace", False)
+-        self._sandbox_level = config.get("tools", {}).get("sandboxLevel", "workspace")
++        # Default sandbox level is fully open ("unrestricted")
++        self._sandbox_level = config.get("tools", {}).get("sandboxLevel", "unrestricted")
+         # "workspace" level implies path restriction
+         if self._sandbox_level == "workspace":
+             self._restrict = True
+@@ -510,9 +546,9 @@
+             proc.kill()
+             return "Error: command timed out after 120 seconds"
+ 
+-        out = stdout.decode(errors="replace")
++        out = _decode_bytes(stdout)
+         if stderr:
+-            out += "\n" + stderr.decode(errors="replace")
++            out += "\n" + _decode_bytes(stderr)
+         if len(out) > 50_000:
+             out = out[:50_000] + "\n… (truncated)"
+         return out or "(no output)"
+@@ -589,10 +625,10 @@
+         stdout, stderr = await proc.communicate()
+ 
+         if proc.returncode not in (0, 1):
+-            err = stderr.decode(errors="replace").strip()
++            err = _decode_bytes(stderr).strip()
+             return f"Error: search failed: {err or 'unknown error'}"
+ 
+-        out = stdout.decode(errors="replace").strip()
++        out = _decode_bytes(stdout).strip()
+         if not out:
+             return "No matches found."
+         if len(out) > 100_000:
+@@ -604,31 +640,25 @@
+         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+     )
+ 
+-    # Tried in order — the lite endpoint is smaller and survives rate
+-    # limiting more often than the full HTML one.
+-    _DDG_ENDPOINTS = (
+-        ("https://lite.duckduckgo.com/lite/", _parse_ddg_lite),
+-        ("https://html.duckduckgo.com/html/", _parse_ddg_html),
+-    )
+-
+     async def _web_search(self, query: str) -> str:
+-        """Search via DuckDuckGo HTML — free, no API key required.
+-
+-        Failures return an ``Error:`` string that names the cause and tells
+-        the model not to retry, otherwise small models loop on the same
+-        query until they burn through max_iterations.
++        """Search via China-accessible engines (Bing CN / Sogou / Baidu).
++
++        DuckDuckGo (the previous backend) is unreachable from mainland
++        China, so we rotate through domestic engines and return the first
++        one that yields results. Failures return an ``Error:`` string that
++        names the cause and tells the model not to retry.
+         """
+         failures: list[str] = []
+ 
+-        for url, parser in self._DDG_ENDPOINTS:
++        for engine in _SEARCH_ENGINES:
++            url = engine["url"](query)
+             host = urlparse(url).hostname or url
+             try:
+-                resp = await self._http.post(
++                resp = await self._http.get(
+                     url,
+-                    data={"q": query},
+                     headers={
+                         "User-Agent": self._BROWSER_UA,
+-                        "Content-Type": "application/x-www-form-urlencoded",
++                        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                     },
+                     follow_redirects=True,
+                     timeout=15,
+@@ -641,12 +671,7 @@
+                 failures.append(f"{host}: HTTP {resp.status_code}")
+                 continue
+ 
+-            verdict = _classify_ddg_page(resp.text)
+-            if verdict == "blocked":
+-                failures.append(f"{host}: rate-limited or blocked by a network filter")
+-                continue
+-
+-            results = parser(resp.text)
++            results = engine["parse"](resp.text)
+             if results:
+                 return "\n\n".join(
+                     f"**{r['title']}**\n{r['url']}"
+@@ -654,11 +679,6 @@
+                     for r in results
+                 )
+ 
+-            if verdict == "empty":
+-                return (
+-                    f"No results found for '{query}'. "
+-                    "Try different or broader keywords."
+-                )
+             failures.append(f"{host}: response had no parsable results")
+ 
+         return (
+--- a/agent_mini/cli.py
++++ b/agent_mini/cli.py
+@@ -765,7 +765,7 @@
+         console.print(f"    {name:12s} {tag}")
+ 
+     # Tools
+-    console.print("  Web search: [green]enabled[/green] (DuckDuckGo)")
++    console.print("  Web search: [green]enabled[/green] (Bing CN / Sogou / Baidu)")
+     console.print("  Web fetch : [green]enabled[/green]")
+     mem = config.get("memory", {}).get("enabled", True)
+     console.print(
+--- a/agent_mini/config.py
++++ b/agent_mini/config.py
+@@ -123,7 +123,7 @@
+     """Load config from ~/.agent-mini/config.json."""
+     if not CONFIG_FILE.exists():
+         return {}
+-    with open(CONFIG_FILE) as f:
++    with open(CONFIG_FILE, encoding="utf-8") as f:
+         return json.load(f)
+ 
+ 
+@@ -138,8 +138,8 @@
+ def save_config(config: dict) -> None:
+     """Save config to ~/.agent-mini/config.json."""
+     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+-    with open(CONFIG_FILE, "w") as f:
+-        json.dump(config, f, indent=2)
++    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
++        json.dump(config, f, indent=2, ensure_ascii=False)
+ 
+ 
+ def get_workspace(config: dict | None = None) -> Path:
+--- a/agent_mini/providers/__init__.py
++++ b/agent_mini/providers/__init__.py
+@@ -20,6 +20,7 @@
+                 base_url=cfg.get("baseUrl", "http://localhost:11434"),
+                 model=cfg.get("model", "llama3.1"),
+                 think=cfg.get("think"),
++                num_ctx=cfg.get("numCtx"),
+             )
+         case "openai":
+             return OpenAIProvider(
+--- a/agent_mini/providers/ollama.py
++++ b/agent_mini/providers/ollama.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+ 
+ import json
++import re
+ from typing import Any
+ 
+ import httpx
+@@ -14,6 +15,23 @@
+     parse_openai_tool_calls,
+ )
+ 
++# [AgentWebUI patch] lfm2.5 等模型的模板会把思考以 <think>…</think> 写在正文流里
++# （不遵守 think 参数），需要增量剥离，避免思考标签/内容污染回答。
++_THINK_OPEN = "<think>"
++_THINK_CLOSE = "</think>"
++_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.S)
++
++
++def _strip_think_final(text: str) -> str:
++    """兜底清洗：移除 <think>…</think> 与未闭合残留（用于非流式/收尾）。"""
++    if not text:
++        return text
++    text = _THINK_BLOCK_RE.sub("", text)
++    if _THINK_OPEN in text:
++        text = text.split(_THINK_OPEN, 1)[0]
++    text = text.replace(_THINK_CLOSE, "").replace(_THINK_OPEN, "")
++    return text
++
+ 
+ class OllamaProvider(BaseProvider):
+     """Connect to a running Ollama instance.
+@@ -26,10 +44,12 @@
+         base_url: str = "http://localhost:11434",
+         model: str = "llama3.1",
+         think: bool | str | None = None,
++        num_ctx: int | None = None,
+     ):
+         self._base_url = base_url.rstrip("/")
+         self._model = model
+         self._think = think
++        self._num_ctx = num_ctx
+         self._client = httpx.AsyncClient(timeout=300)
+ 
+     async def close(self) -> None:
+@@ -72,6 +92,22 @@
+         thinking_parts: list[str] = []
+         last_message: dict[str, Any] = {}
+         tool_calls_raw: list[dict] | None = None
++
++        # [AgentWebUI patch] 增量剥离 <think>…</think>（标签可能跨 chunk 分片）
++        pending = ""
++        in_think = False
++        # 思考分块合并：Ollama chunk 极碎，攒够一段再回调 on_thinking，减少前端抖动
++        think_buf: list[str] = []
++        think_len = 0
++        _THINK_CHUNK = 160
++
++        async def _flush_think_buf():
++            nonlocal think_buf, think_len
++            if think_buf and on_thinking:
++                text = "".join(think_buf)
++                think_buf = []
++                think_len = 0
++                await on_thinking(text)
+ 
+         async with self._client.stream(
+             "POST",
+@@ -92,20 +128,79 @@
+                     last_message = message
+ 
+                 delta = message.get("content") or ""
+-                if delta:
+-                    content_parts.append(delta)
+-                    await on_delta(delta)
+-
+-                thinking_delta = message.get("thinking") or ""
+-                if thinking_delta:
+-                    thinking_parts.append(thinking_delta)
+-                    if on_thinking:
+-                        await on_thinking(thinking_delta)
++                if not delta:
++                    thinking_delta = message.get("thinking") or ""
++                    if thinking_delta:
++                        thinking_parts.append(thinking_delta)
++                        if on_thinking:
++                            await on_thinking(thinking_delta)
++                    if message.get("tool_calls"):
++                        tool_calls_raw = message["tool_calls"]
++                    continue
++
++                pending += delta
++                # 解析当前 buffer：<think> 内容丢弃（转 thinking），其余作为正文
++                while pending:
++                    if in_think:
++                        ci = pending.find(_THINK_CLOSE)
++                        if ci == -1:
++                            # </think> 可能被截断在尾部：先留出最长闭合标签前缀长度
++                            hold = min(len(_THINK_CLOSE) - 1, len(pending))
++                            if len(pending) > hold:
++                                seg = pending[:-hold]
++                                thinking_parts.append(seg)
++                                think_buf.append(seg)
++                                think_len += len(seg)
++                                if think_len >= _THINK_CHUNK:
++                                    await _flush_think_buf()
++                            pending = pending[-hold:] if hold else ""
++                            break
++                        head = pending[:ci]
++                        if head:
++                            thinking_parts.append(head)
++                            think_buf.append(head)
++                            think_len += len(head)
++                            if think_len >= _THINK_CHUNK:
++                                await _flush_think_buf()
++                        in_think = False
++                        await _flush_think_buf()   # 一段思考结束：把残留整段送达
++                        pending = pending[ci + len(_THINK_CLOSE):]
++                        continue
++                    oi = pending.find(_THINK_OPEN)
++                    if oi == -1:
++                        hold = min(len(_THINK_OPEN) - 1, len(pending))
++                        if len(pending) > hold:
++                            safe = pending[:-hold]
++                            content_parts.append(safe)
++                            await on_delta(safe)
++                            pending = pending[-hold:]
++                        break
++                    before = pending[:oi]
++                    if before:
++                        content_parts.append(before)
++                        await on_delta(before)
++                    in_think = True
++                    pending = pending[oi + len(_THINK_OPEN):]
+ 
+                 if message.get("tool_calls"):
+                     tool_calls_raw = message["tool_calls"]
+ 
++        # 收尾：残留 tail（正常正文 / 未闭合思考）
++        if pending:
++            if in_think:
++                thinking_parts.append(pending)
++                think_buf.append(pending)
++            else:
++                safe = pending
++                if _THINK_OPEN in safe or _THINK_CLOSE in safe:
++                    safe = _strip_think_final(safe)
++                if safe:
++                    content_parts.append(safe)
++                    await on_delta(safe)
++        await _flush_think_buf()  # 兜底：未闭合思考的残留也送达
++
+         content = "".join(content_parts) or (last_message.get("content") or None)
++        content = _strip_think_final(content or "") or None
+         thinking = "".join(thinking_parts) or (last_message.get("thinking") or None)
+         tool_calls = parse_openai_tool_calls(
+             tool_calls_raw or last_message.get("tool_calls")
+@@ -125,6 +220,9 @@
+             "stream": stream,
+             "options": {"temperature": temperature},
+         }
++        # [AgentWebUI patch] 显式传递上下文窗口上限（config providers.*.numCtx）
++        if self._num_ctx:
++            payload["options"]["num_ctx"] = int(self._num_ctx)
+         if tools:
+             payload["tools"] = tools
+         if self._think not in (None, ""):
+@@ -144,7 +242,7 @@
+                 ),
+             }
+         return ChatResponse(
+-            content=msg.get("content") or None,
++            content=_strip_think_final(msg.get("content") or "") or None,
+             tool_calls=parse_openai_tool_calls(msg.get("tool_calls")),
+             thinking=msg.get("thinking") or None,
+             usage=usage,

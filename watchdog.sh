@@ -8,6 +8,8 @@
 # 启动: bash watchdog.sh start
 # 停止: bash watchdog.sh stop
 # 状态: bash watchdog.sh status
+# 日志: 全部写入 logs/watchdog.log（含每次 git 拉取结果），实时查看 tail -f logs/watchdog.log
+#       前台直接运行 bash watchdog.sh loop 时日志同时实时打印到终端
 # =============================================================
 set -u
 cd "$(dirname "$0")"
@@ -24,7 +26,12 @@ GIT_REMOTE="${GIT_REMOTE:-origin}"
 GIT_BRANCH="${GIT_BRANCH:-main}"
 
 ts() { date '+%F %T'; }
-log() { echo "[$(ts)] $*" >> "$LOG"; }
+# 日志：始终落盘 logs/watchdog.log；前台直接跑 loop 时（stdout 是终端）同时实时打印
+log() {
+  local line="[$(ts)] $*"
+  [ -t 1 ] && echo "$line"
+  echo "$line" >> "$LOG"
+}
 
 start_watchdog() {
   mkdir -p logs .pids
@@ -32,9 +39,11 @@ start_watchdog() {
     echo "watchdog 已在运行 (pid $(cat "$PID_FILE"))"
     return
   fi
-  nohup bash "$0" loop >/dev/null 2>&1 </dev/null &
+  # stdout/stderr 并入日志文件（不再丢弃），后台运行时全部输出仍可 tail 查看
+  nohup bash "$0" loop >>"$LOG" 2>&1 </dev/null &
   echo $! > "$PID_FILE"
   echo "watchdog 已启动 (pid $(cat "$PID_FILE"))"
+  echo "实时查看: tail -f $LOG"
 }
 
 stop_watchdog() {
@@ -95,23 +104,29 @@ ensure_proc() {
   log "[$name] 已重启 (pid $(cat "$pidfile"))"
 }
 
-# 自动拉取 Gitee 更新：ff-only 安全快进，代码变化则重启 bridge/webui
+# 自动拉取 Gitee 更新：ff-only 安全快进，代码变化则重启 bridge/webui。
+# 每次检查都留痕（fetch 失败 / 合并冲突 / 已更新 / 无更新），便于后台排查。
 git_sync() {
   command -v git >/dev/null 2>&1 || { log "git_sync: git 未安装，跳过"; return; }
   [ -d .git ] || { log "git_sync: 非 git 仓库，跳过"; return; }
-  local before after
+  local before after ferr merr
   before="$(git rev-parse --short HEAD 2>/dev/null)"
-  git fetch "$GIT_REMOTE" "$GIT_BRANCH" >/dev/null 2>&1
-  if ! git merge --ff-only "$GIT_REMOTE/$GIT_BRANCH" >/dev/null 2>&1; then
-    log "git_sync: 拉取失败（可能有本地改动冲突），保留当前版本"
+  ferr="$(git fetch "$GIT_REMOTE" "$GIT_BRANCH" 2>&1)" || {
+    log "git_sync: fetch 失败（网络/凭据?）: $(echo "$ferr" | tail -1 | cut -c1-140)，保留 $before"
     return
-  fi
+  }
+  merr="$(git merge --ff-only "$GIT_REMOTE/$GIT_BRANCH" 2>&1)" || {
+    log "git_sync: 拉取失败（可能有本地改动冲突）: $(echo "$merr" | tail -1 | cut -c1-140)，保留 $before"
+    return
+  }
   after="$(git rev-parse --short HEAD 2>/dev/null)"
   if [ "$before" != "$after" ]; then
     log "git_sync: 代码已更新 $before -> $after，重启服务生效"
     # 杀掉 bridge/webui 旧进程，下一轮 ensure 会自动拉起新代码
     [ -f ".pids/bridge.pid" ] && kill "$(cat .pids/bridge.pid)" 2>/dev/null
     [ -f ".pids/web.pid" ] && kill "$(cat .pids/web.pid)" 2>/dev/null
+  else
+    log "git_sync: 检查完成，无新更新（HEAD=$before）"
   fi
 }
 

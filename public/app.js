@@ -903,34 +903,236 @@
       return;
     }
 
-    const ctx = { full: st.content || "", tools: st.tools || [], reasoning: st.reasoning || "", normalDone: false, eventIndex: st.event_count || 0 };
+    const ctx = { full: st.content || "", tools: st.tools || [], reasoning: st.reasoning || "", nodes: [], nodeEls: [], statusTip: "", phase: "wait", normalDone: false, eventIndex: st.event_count || 0, textShown: 0, drainTimer: null, pendingDone: false };
     let bubble = null;
-    const repaint = (cursor) => {
-      if (!bubble) return;
-      // 服务端还没有任何事件（模型冷启动思考前的空窗）：保留加载指示，不渲染空白
-      if (!ctx.reasoning && !ctx.tools.length && !ctx.full) return;
-      const reasoningHtml = ctx.reasoning
-        ? `<div class="tool-list">${thinkChipHtml(ctx.reasoning, false)}</div>` : "";
-      const toolsHtml = ctx.tools.length ? `<div class="tool-list">${ctx.tools.map(toolChip).join("")}</div>` : "";
-      bubble.innerHTML = reasoningHtml + toolsHtml + md(ctx.full);
-      bubble.classList.toggle("typing-cursor", !!cursor);
-      scrollBottom();
-    };
-    // streamLoop 统一走增量接口；恢复场景退化为全量渲染
-    ctx.repaint = repaint;
-    ctx.addText = (delta) => { ctx.full += delta; repaint(true); };
-    ctx.addTool = (tool) => { ctx.tools.push(tool); repaint(true); };
-    ctx.addThink = (delta) => { ctx.reasoning += (ctx.reasoning ? "\n\n" : "") + delta; repaint(true); };
-    ctx.setCursor = (on) => repaint(on);
-    ctx.smartScroll = () => scrollBottom();
-    ctx.syncTip = () => {};
+    let bodyEl = null;
+    let tipEl = null;
+    let textNodeIdx = -1;
 
     const aiNode = msgNode("assistant", "");
     bubble = aiNode.querySelector(".msg-bubble");
-    bubble.innerHTML = `<span class="dots"><span></span><span></span><span></span></span>`; // 等待加载指示
+    bubble.innerHTML = `<div class="stream-body"></div>`;
+    bodyEl = bubble.firstElementChild;
+    tipEl = document.createElement("div");
+    tipEl.className = "waiting-tip";
+    tipEl.style.display = "none";
+    bodyEl.appendChild(tipEl);
     messagesEl.appendChild(aiNode);
-    liveView = { convId: saved.convId, aiNode }; // 恢复的任务气泡同样登记：后续切走/重渲染可自愈挂回
-    repaint(false);
+    liveView = { convId: saved.convId, aiNode };
+
+    // ===== 增量渲染（与正常流式流程一致：不重建 DOM、打字机输出、智能滚动，避免气泡跳动/不锁底/token不连续）=====
+    const renderNode = (n) => {
+      if (n.type === "text") {
+        const el = document.createElement("div");
+        el.className = "stream-text";
+        el.innerHTML = md(n.value);
+        return el;
+      }
+      if (n.type === "think") {
+        const el = document.createElement("div");
+        el.className = "tool-list";
+        el.innerHTML = thinkChipHtml(n.value, n.live !== false);
+        return el;
+      }
+      const el = document.createElement("div");
+      el.className = "tool-list";
+      el.innerHTML = toolChip(n.tool);
+      const hasRes = n.tool.result_preview !== undefined && n.tool.result_preview !== null;
+      if (!hasRes) el.querySelector(".tool-chip")?.classList.add("open");
+      return el;
+    };
+
+    const rebuildNodes = () => {
+      ctx.nodes = [];
+      ctx.nodeEls = [];
+      bodyEl.innerHTML = "";
+      // 恢复时思考进行中（尚无正文）→ live=true 默认展开；正文已开始 → live=false 折叠
+      if (ctx.reasoning) ctx.nodes.push({ type: "think", value: ctx.reasoning, live: !ctx.full });
+      if (ctx.full) ctx.nodes.push({ type: "text", value: ctx.full });
+      for (const t of ctx.tools) ctx.nodes.push({ type: "tool", tool: t });
+      for (const n of ctx.nodes) {
+        const el = renderNode(n);
+        bodyEl.appendChild(el);
+        ctx.nodeEls.push(el);
+      }
+      bodyEl.appendChild(tipEl);
+      textNodeIdx = ctx.nodes.findIndex((n) => n.type === "text");
+    };
+
+    const syncTip = () => {
+      tipEl.style.display = ctx.statusTip ? "" : "none";
+      tipEl.textContent = ctx.statusTip || "";
+    };
+
+    ctx.setPhase = (phase, text) => {
+      if (ctx.phase === phase && ctx.statusTip === text) return;
+      ctx.phase = phase;
+      ctx.statusTip = text;
+      syncTip();
+    };
+    ctx.setCursor = (on) => bubble.classList.toggle("typing-cursor", !!on);
+    ctx.smartScroll = () => {
+      const c = chatScroll;
+      if (c.scrollHeight - c.scrollTop - c.clientHeight < 140) c.scrollTop = c.scrollHeight;
+    };
+    ctx.touch = () => {};
+
+    // 思考卡片折叠（开始输出正文/发起工具时调用）
+    ctx.collapseThink = () => {
+      for (let i = 0; i < ctx.nodes.length; i++) {
+        const n = ctx.nodes[i];
+        if (n.type === "think" && n.live) {
+          n.live = false;
+          const fresh = renderNode(n);
+          ctx.nodeEls[i].replaceWith(fresh);
+          ctx.nodeEls[i] = fresh;
+        }
+      }
+    };
+
+    // 文本节点：打字机效果（每28ms推进2字符，用textContent避免逐帧markdown重排）
+    const ensureTextNode = () => {
+      if (textNodeIdx !== -1) return textNodeIdx;
+      const found = ctx.nodes.findIndex((n) => n.type === "text");
+      if (found !== -1) { textNodeIdx = found; return found; }
+      ctx.nodes.push({ type: "text", value: "" });
+      const el = renderNode(ctx.nodes[ctx.nodes.length - 1]);
+      bodyEl.insertBefore(el, tipEl);
+      ctx.nodeEls.push(el);
+      textNodeIdx = ctx.nodeEls.length - 1;
+      return textNodeIdx;
+    };
+
+    ctx.startDrain = () => {
+      if (ctx.drainTimer) return;
+      const tick = () => {
+        const el = ctx.nodeEls[textNodeIdx];
+        if (!el) { ctx.drainTimer = null; return; }
+        if (ctx.textShown >= ctx.full.length) {
+          clearInterval(ctx.drainTimer);
+          ctx.drainTimer = null;
+          if (ctx.pendingDone) { ctx.pendingDone = false; ctx.flushText?.(); scrollBottom(); }
+          return;
+        }
+        ctx.textShown = Math.min(ctx.full.length, ctx.textShown + 2);
+        const shown = ctx.full.slice(0, ctx.textShown);
+        ctx.nodes[textNodeIdx].value = shown;
+        el.style.whiteSpace = "pre-wrap";
+        el.textContent = shown;
+      };
+      ctx.drainTimer = setInterval(tick, 28);
+      tick();
+    };
+
+    ctx.flushText = () => {
+      if (ctx.drainTimer) { clearInterval(ctx.drainTimer); ctx.drainTimer = null; }
+      ctx.textShown = ctx.full.length;
+      const n = ctx.nodes[textNodeIdx];
+      if (n && n.type === "text") {
+        n.value = ctx.full;
+        const tel = ctx.nodeEls[textNodeIdx];
+        if (tel) { tel.style.whiteSpace = ""; tel.innerHTML = md(ctx.full); }
+      }
+    };
+
+    ctx.addText = (delta) => {
+      if (delta) {
+        const nextFull = ctx.full + delta;
+        if (!ctx.full.trim() && !delta.trim()) { ctx.full = nextFull; syncTip(); return; }
+        ctx.full = nextFull;
+      }
+      if (!ctx.full.trim()) return;
+      ctx.collapseThink?.();
+      ctx.setPhase("output", "");
+      bodyEl.querySelector(".dots")?.remove();
+      ensureTextNode();
+      ctx.nodes[textNodeIdx].value = ctx.full;
+      ctx.startDrain?.();
+      syncTip();
+    };
+
+    // 深度思考：增量更新 pre.textContent，不重建 DOM（展开状态自然保留，内部滚动位置不丢失）
+    ctx.addThink = (delta) => {
+      ctx.setPhase("think", "");
+      const nodes = ctx.nodes;
+      const last = nodes[nodes.length - 1];
+      if (last && last.type === "think" && last.live) {
+        ctx.reasoning += delta;
+        last.value += delta;
+        const el = ctx.nodeEls[nodes.length - 1];
+        const pre = el && el.querySelector("pre");
+        if (pre) {
+          const nearBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 60;
+          pre.textContent = last.value;
+          if (nearBottom) pre.scrollTop = pre.scrollHeight;
+        }
+      } else {
+        ctx.collapseThink?.();
+        ctx.reasoning += (ctx.reasoning ? "\n\n" : "") + delta;
+        nodes.push({ type: "think", value: delta, live: true });
+        const el = renderNode(nodes[nodes.length - 1]);
+        bodyEl.insertBefore(el, tipEl);
+        ctx.nodeEls.push(el);
+      }
+      syncTip();
+    };
+
+    ctx.addTool = (tool) => {
+      ctx.tools.push(tool);
+      ctx.setPhase("tool", "");
+      const el = renderNode({ type: "tool", tool });
+      bodyEl.insertBefore(el, tipEl);
+      ctx.nodeEls.push(el);
+      ctx.nodes.push({ type: "tool", tool });
+      syncTip();
+    };
+
+    ctx.rebuild = rebuildNodes;
+    ctx.syncTip = syncTip;
+
+    // 结束/恢复时的重绘：只更新最后节点，不整体重建 DOM
+    const repaint = (cursor) => {
+      if (!ctx.nodes.length) {
+        rebuildNodes();
+      } else {
+        const last = ctx.nodes[ctx.nodes.length - 1];
+        if (last && last.type === "text") {
+          last.value = ctx.full;
+          if (!ctx.drainTimer) {
+            const tel = ctx.nodeEls[ctx.nodeEls.length - 1];
+            if (tel) { tel.style.whiteSpace = ""; tel.innerHTML = md(ctx.full); }
+          }
+        } else if (ctx.full) {
+          ctx.addText(ctx.full);
+        }
+        syncTip();
+      }
+      // 仅在任务结束时折叠思考卡片；初始化/进行中调用 repaint 不应折叠，否则后续思考 token 会误判为新一轮而新建卡片
+      if (ctx.normalDone) ctx.collapseThink?.();
+      ctx.setCursor(cursor);
+      scrollBottom();
+    };
+    ctx.repaint = repaint;
+
+    // 先用已有内容渲染（恢复时可能已有部分思考/正文/工具）
+    if (ctx.reasoning || ctx.tools.length || ctx.full) {
+      rebuildNodes();
+      // 恢复时已有正文 → 视为已输出部分，textShown 对齐，后续新 token 从当前位置继续打字
+      if (ctx.full && textNodeIdx !== -1) {
+        ctx.textShown = ctx.full.length;
+        const tel = ctx.nodeEls[textNodeIdx];
+        if (tel) { tel.style.whiteSpace = ""; tel.innerHTML = md(ctx.full); }
+      }
+    } else {
+      // 尚无任何内容：显示加载指示
+      const dots = document.createElement("span");
+      dots.className = "dots";
+      dots.innerHTML = "<span></span><span></span><span></span>";
+      bodyEl.appendChild(dots);
+    }
+    // 初始化不调用 repaint()：rebuildNodes 已完成渲染，repaint 会误触发 collapseThink 把进行中的思考卡片置为 live=false
+    ctx.setCursor(false);
+    scrollBottom();
     setStreaming(true);
     abortCtrl = new AbortController();
 

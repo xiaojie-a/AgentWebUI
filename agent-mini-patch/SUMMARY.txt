@@ -1,0 +1,13 @@
+=== AgentWebUI 定制 vs PyPI 官方 agent-mini 0.3.1 ===
+基准: agent_mini-0.3.1-py3-none-any.whl
+目标: agent_mini-0.3.1+agentwebui-py3-none-any.whl
+
+  M agent_mini/agent/context.py                  +17   / -1     (原 112 行 -> 现 128 行)
+  M agent_mini/agent/loop.py                     +4    / -2     (原 380 行 -> 现 382 行)
+  M agent_mini/agent/tools.py                    +152  / -132   (原 711 行 -> 现 731 行)
+  M agent_mini/cli.py                            +1    / -1     (原 774 行 -> 现 774 行)
+  M agent_mini/config.py                         +3    / -3     (原 151 行 -> 现 151 行)
+  M agent_mini/providers/__init__.py             +1    / -0     (原 50 行 -> 现 51 行)
+  M agent_mini/providers/ollama.py               +108  / -10    (原 202 行 -> 现 300 行)
+
+共 7 个源文件存在差异。
