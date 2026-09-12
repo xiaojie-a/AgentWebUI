@@ -540,7 +540,9 @@ async def main():
             # [AgentWebUI patch] 主调用的 prompt_tokens；极端情况（本轮主调用没走
             # chat_stream）退回本轮第一次调用的值，避免退化成 0。
             _prompt_tokens = _last_usage["prompt_tokens"] or (_usage_log[0]["prompt_tokens"] if _usage_log else 0)
-            _payload = {"done": True, "usage": agent.turn_usage, "last_prompt_tokens": _prompt_tokens}
+            _payload = {"done": True, "usage": agent.turn_usage, "last_prompt_tokens": _prompt_tokens,
+                        # [AgentWebUI patch] 系统提示 token 估算：WebUI 上下文圆环"系统提示"分段显示用
+                        "system_prompt_tokens": (getattr(agent, "_system_prompt_tokens", 0) or 0)}
             # [AgentWebUI patch] 压缩信息：前端据此显示"压缩后占比"与压缩明细
             _comp = getattr(agent, "last_compaction", None)
             if _comp:
@@ -617,6 +619,7 @@ asyncio.run(main())
         const usage = doneEvent && doneEvent.usage ? doneEvent.usage : null;
         const last_prompt_tokens = doneEvent && doneEvent.last_prompt_tokens ? doneEvent.last_prompt_tokens : 0;
         const compaction = doneEvent && doneEvent.compaction ? doneEvent.compaction : null;
+        const system_prompt_tokens = doneEvent && doneEvent.system_prompt_tokens ? doneEvent.system_prompt_tokens : 0;
 
         return {
             task_id: task.id,
@@ -626,7 +629,8 @@ asyncio.run(main())
             event_count: task.events.length,
             usage: usage,
             last_prompt_tokens: last_prompt_tokens,
-            compaction: compaction
+            compaction: compaction,
+            system_prompt_tokens: system_prompt_tokens
         };
     }
 }

@@ -98,6 +98,9 @@
       else if (m.role === "user") byType.other += estimateTokens(m.content);
       else byType.other += estimateTokens(m.content || "");
     }
+    // [AgentWebUI patch] 系统提示不进会话消息（agent-mini 调用时临时拼进 messages），
+    // 其 token 数由后端随 done 事件带回，挂在 conv.systemPromptTokens。挂上时累加进 system 段。
+    if (conv.systemPromptTokens && conv.systemPromptTokens > 0) byType.system += conv.systemPromptTokens;
     return byType;
   }
   function renderStackedBar(byType, total, isReal, completionTokens) {
@@ -693,7 +696,7 @@
               ctx.statusTip = `⏳ 模型响应较慢，请稍候…（已等待 ${data.silent_seconds || 0} 秒）`;
               if (ctx.syncTip) ctx.syncTip();
             }
-            if (data.done) { if (ctx.setCursor) ctx.setCursor(false); ctx.normalDone = true; ctx.usage = data.usage || null; ctx.last_prompt_tokens = data.last_prompt_tokens || 0; ctx.compaction = data.compaction || null; return; }
+            if (data.done) { if (ctx.setCursor) ctx.setCursor(false); ctx.normalDone = true; ctx.usage = data.usage || null; ctx.last_prompt_tokens = data.last_prompt_tokens || 0; ctx.compaction = data.compaction || null; ctx.systemPromptTokens = (data.system_prompt_tokens || 0); { const cv = currentConv(); if (cv) cv.systemPromptTokens = ctx.systemPromptTokens; } return; }
             if (data.cancelled) { if (ctx.setCursor) ctx.setCursor(false); return; }
             if (data.error) { if (ctx.setCursor) ctx.setCursor(false); throw new Error(data.error); }
           }

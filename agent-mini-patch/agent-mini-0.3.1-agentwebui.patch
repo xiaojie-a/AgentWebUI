@@ -158,8 +158,27 @@
      ) -> str:
          """Process *user_message* and return the assistant's final text reply.
  
-@@ -110,6 +166,8 @@
+@@ -108,8 +164,27 @@
+             tool_defs=tool_defs,
+         )
  
++        # [AgentWebUI patch] 系统提示 token 估算，供 WebUI 上下文圆环"系统提示"分段显示。
++        # 系统提示是调用时临时拼进 messages 的，从不以消息形式存入会话，前端无法从
++        # 会话消息统计它；这里用与前端 estimateTokens 同款的 CJK 公式（cjk*0.7 + 其余/4）
++        # 算出估算值，随 done 事件带回。真实占用量由 last_prompt_tokens 兜底。
++        try:
++            _cjk = sum(
++                1 for _ch in system_prompt
++                if "\u4e00" <= _ch <= "\u9fff"
++                or "\u3040" <= _ch <= "\u30ff"
++                or "\uac00" <= _ch <= "\ud7af"
++            )
++            self._system_prompt_tokens = max(
++                0, round(_cjk * 0.7 + (len(system_prompt) - _cjk) / 4)
++            )
++        except Exception:
++            self._system_prompt_tokens = 0
++
          # Reset per-turn usage tracking
          self.turn_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 +        # [AgentWebUI patch] 重置上一轮的压缩记录，避免重复播报
@@ -167,7 +186,7 @@
  
          # Build the full message list for this request
          messages: list[dict] = [{"role": "system", "content": system_prompt}]
-@@ -129,7 +187,7 @@
+@@ -129,7 +204,7 @@
              pruned = self._prune_tool_results(messages)
  
              response = await self._call_provider_with_retry(
@@ -176,7 +195,7 @@
              )
              if isinstance(response, str):
                  # Error string from retry exhaustion
-@@ -149,10 +207,24 @@
+@@ -149,10 +224,24 @@
                  conversation.append({"role": "user", "content": user_message})
                  conversation.append({"role": "assistant", "content": final})
                  # Token-aware compaction: summarize when conversation
@@ -204,7 +223,7 @@
                  return final
  
              # ----- tool calls → execute in parallel and continue -----
-@@ -285,12 +357,16 @@
+@@ -285,12 +374,16 @@
                  pruned.append({**msg, "content": "[Old tool result cleared to save context]"})
          return pruned
  
@@ -225,7 +244,7 @@
          acc, cut = 0, 0
          for i, msg in enumerate(conversation):
              acc += estimate_messages_tokens([msg])
-@@ -302,6 +378,9 @@
+@@ -302,6 +395,9 @@
  
          to_summarize = conversation[:cut]
          keep = conversation[cut:]
@@ -235,7 +254,7 @@
  
          # Build a tight summarization request
          summary_messages = [
-@@ -330,7 +409,16 @@
+@@ -330,7 +426,16 @@
              summary_text = response.content or "Previous conversation context."
          except Exception as e:
              log.warning("Failed to summarize history: %s", e)
@@ -253,7 +272,7 @@
  
          # Use role='user' rather than 'system' — the real system prompt is
          # prepended fresh every turn in run(), so a second 'system' entry
-@@ -345,8 +433,17 @@
+@@ -345,8 +450,17 @@
          new_conversation.extend(keep)
          conversation.clear()
          conversation.extend(new_conversation)
@@ -273,7 +292,7 @@
          """Call the provider with retry + exponential backoff (with jitter) for transient errors."""
          max_retries = 3
          for attempt in range(max_retries):
-@@ -357,6 +454,7 @@
+@@ -357,6 +471,7 @@
                          on_delta=on_stream,
                          tools=tool_defs or None,
                          temperature=self.temperature,

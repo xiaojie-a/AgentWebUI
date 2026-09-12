@@ -3,13 +3,13 @@ agent-mini 定制包（AgentWebUI 专用）安装说明
 
 文件清单
 --------
-  agent_mini-0.3.1+agentwebui.4-py3-none-any.whl 已打好补丁的 agent-mini 0.3.1（纯 Python，跨平台）
+  agent_mini-0.3.1+agentwebui.5-py3-none-any.whl 已打好补丁的 agent-mini 0.3.1（纯 Python，跨平台）
   agent-mini-0.3.1-agentwebui.patch              相对官方 0.3.1 的源码补丁（可 git apply）
   SUMMARY.txt                                    逐文件改动统计
   verify_precise_token.py                        精确 Token 全链路验证（直调 provider + 走 bridge）
   verify_numctx_linkage.py                       有效上下文/压缩阈值 是否跟随 numCtx 的验证
 
-  版本说明：本地版本号后缀会随改动递增（.1 → .2 → .3 → .4）。同名版本重复安装时 pip 会跳过，
+  版本说明：本地版本号后缀会随改动递增（.1 → .2 → .3 → .4 → .5）。同名版本重复安装时 pip 会跳过，
   升级请用 `pip install --force-reinstall`（或 `--upgrade`，.3 > .2 会被识别为更新）。
 
 
@@ -85,7 +85,7 @@ AgentWebUI 依赖 agent-mini，但官方 0.3.1 直接配 AgentWebUI **在任何�
   （ollama 在最后一个 done chunk 里给出），返回时构造 usage 字典交给 ChatResponse。
 
   实测（xem / Ubuntu / qwen3:1.7b，2026-09-12）：
-      直接调 provider.chat_stream  -> usage={'prompt_tokens': 16,
+      直接调 provider.chat_stream -> usage={'prompt_tokens': 16,
                                              'completion_tokens': 182,
                                              'total_tokens': 198}
       走 bridge 全链路 (/task/state) -> usage={'prompt_tokens': 1851, ...}
@@ -94,7 +94,6 @@ AgentWebUI 依赖 agent-mini，但官方 0.3.1 直接配 AgentWebUI **在任何�
   注意：这块与【故障 1】无关，缺它只是"少个功能"，不会崩。但**前端的"精确 Token"
   必须配它**：仓库里 agent_bridge.js / public/app.js 已经带 [精确Token] 逻辑，
   如果装的 agent-mini 是旧包，UI 会静默退回估算值。
-
 
 【故障 7｜静默失效：有效上下文/压缩阈值被档位钉死，跟 numCtx 脱钩】
 
@@ -125,23 +124,41 @@ AgentWebUI 依赖 agent-mini，但官方 0.3.1 直接配 AgentWebUI **在任何�
   自查：python verify_numctx_linkage.py
         若 numCtx=35840 那行显示 6000/4500，说明装的还是旧包。
 
+【故障 8｜前端"系统提示"蓝色段恒为 0，圆环缺一段】
+
+  官方 agent-mini 的系统提示是 run() 里临时 build_system_prompt() 拼进 messages 的，
+  **从不以消息形式存进会话**；而前端上下文圆环的"系统提示（蓝）"段来自对
+  role==="system" 会话消息的累加，于是 byType.system 永远为 0，蓝色段被跳过。
+
+  patch 做法：AgentLoop.run() 拼好系统提示后，用与前端同款 CJK 估算公式算出
+  self._system_prompt_tokens；bridge 的 done 事件带回 system_prompt_tokens，
+  getTaskState 透出；前端 convUsedTokensByType() 末尾累加进 system 段。
+
+  实测（xem / qwen3:1.7b / numCtx 4096）：done 事件
+      system_prompt_tokens: 500    ← 真实系统提示估算（约占 prompt 27%）
+      last_prompt_tokens:    1851
+  硬刷新浏览器后打开上下文圆环弹窗即可看到蓝色"系统提示"段。
+
+  注意：短会话里系统提示 + 工具 schema 确实占 prompt 绝大部分，弹窗按
+  ratio=真实/估算 折算后蓝段可能接近 99%，属正确语义，会话变长后按比例缩小。
+
 
 安装
 ----
-    pip install agent_mini-0.3.1+agentwebui.4-py3-none-any.whl
+    pip install agent_mini-0.3.1+agentwebui.5-py3-none-any.whl
 
 装进虚拟环境 / 指定目录：
 
     python -m venv myenv
-    myenv/bin/pip install agent_mini-0.3.1+agentwebui.4-py3-none-any.whl
+    myenv/bin/pip install agent_mini-0.3.1+agentwebui.5-py3-none-any.whl
 
-装着旧定制版（+agentwebui / .1 / .2）要升级：
+装着旧定制版（+agentwebui / .1 / .2 / .3 / .4）要升级：
 
-    pip install --force-reinstall --no-deps agent_mini-0.3.1+agentwebui.4-py3-none-any.whl
+    pip install --force-reinstall --no-deps agent_mini-0.3.1+agentwebui.5-py3-none-any.whl
 
 pipx 装的（如 xem）：
 
-    pipx install --force agent_mini-0.3.1+agentwebui.4-py3-none-any.whl
+    pipx install --force agent_mini-0.3.1+agentwebui.5-py3-none-any.whl
 
 离线机器：把 whl 拷过去，连同依赖一起装（依赖见官方包，主要是 httpx）。
 
@@ -161,11 +178,14 @@ pipx 装的（如 xem）：
                                            ChatResponse.usage   【新增，见故障 6】
   3. providers/__init__.py     +1       create_provider 向 OllamaProvider
                                        透传 numCtx          【与 2 必须配对】
-  4. agent/loop.py             +62/-7   ① run() 新增 on_thinking 参数并逐层透传
+  4. agent/loop.py             +127/-12 ① run() 新增 on_thinking 参数并逐层透传
                                        【与 2 必须配对】
                                        ② 有效上下文改为读 numCtx（修故障 7）；
                                           压缩比例 compactRatio / compactTargetRatio
                                           可由 config.agent 覆盖（默认 0.75 / 0.5）
+                                       ③ run() 拼好系统提示后用 CJK 公式算
+                                          self._system_prompt_tokens，供前端"系统提示"
+                                          蓝段显示（修故障 8）
   5. agent/context.py          +17/-1   强制"思考/回复跟随用户语言"；支持
                                        systemPrompt 里的 {{CURRENT_DATE}} /
                                        {{CURRENT_TIME}} 占位替换
@@ -235,6 +255,10 @@ pipx 装的（如 xem）：
     xem 上实测脚本见 WorkBuddy 会话 .workbuddy/tools/verify_precise_token.py
     （A: 直接调 provider.chat_stream 看 usage；B: 走 /chat → /task/<id>/state
       看 last_prompt_tokens。两条都 PASS 才算全链路通。）
+
+  验 [系统提示蓝段]（需要 ollama 在跑，走全链路看 system_prompt_tokens）：
+
+    xem 上发起一次对话后读 /task/<id>/state，确认 system_prompt_tokens > 0。
 
 
 卸载 / 回滚到官方版
