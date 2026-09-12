@@ -25,10 +25,12 @@
 
 本项目依赖 [agent-mini](https://pypi.org/project/agent-mini/)，但**官方 0.3.1 配合 AgentWebUI 在任何操作系统上都无法使用**，因此仓库内提供了预先打好补丁的定制包：
 
-📦 `agent-mini-patch/agent_mini-0.3.1+agentwebui-py3-none-any.whl`
+📦 `agent-mini-patch/agent_mini-0.3.1+agentwebui.2-py3-none-any.whl`
 
 ```bash
-pip install agent-mini-patch/agent_mini-0.3.1+agentwebui-py3-none-any.whl
+pip install agent-mini-patch/agent_mini-0.3.1+agentwebui.2-py3-none-any.whl
+# 已装过旧定制版（+agentwebui / .1）时用：
+pip install --force-reinstall --no-deps agent-mini-patch/agent_mini-0.3.1+agentwebui.2-py3-none-any.whl
 ```
 
 ### 为什么需要定制
@@ -75,12 +77,23 @@ TypeError: AgentLoop.run() got an unexpected keyword argument 'on_thinking'
 
 **5️⃣ 工具搜索后端用的是 DuckDuckGo，国内不可达。**
 
+**6️⃣ 上下文用量只能显示"(估算)"（静默降级，不报错）**
+
+官方 `providers/ollama.py` 只在**非流式** `chat()` 里把 `prompt_eval_count` / `eval_count` 填进 `ChatResponse.usage`；WebUI 默认走的**流式** `chat_stream()` 直接 `return ChatResponse(content=..., tool_calls=..., thinking=...)`，**不带 `usage`**。
+
+于是 bridge 的 `[精确Token]` 永远取到 `None`，前端"已用上下文"只能标 `(估算)`，也不会出现「本轮生成 / 本轮总计」两行。
+
+patch 在流式 chunk 循环里记录 `prompt_eval_count` / `eval_count`（ollama 在最后一个 `done` chunk 给出），返回时构造 `usage` 交给 `ChatResponse`。
+实测（xem / Ubuntu / qwen3:1.7b）：直接调 provider 得 `{'prompt_tokens': 16, 'completion_tokens': 182}`；走 bridge 全链路得 `last_prompt_tokens=1851`（真实系统提示量）。
+
+> 这一条与 1️⃣ 无关——缺它不会崩，只是前端静默退回估算值。但 **`agent_bridge.js` / `public/app.js` 已带 `[精确Token]` 逻辑，装旧包就会看到假数字**。
+
 ### 相对官方 0.3.1 的改动（共 7 个文件）
 
 | 文件 | 改动 | 说明 |
 |---|---|---|
 | `config.py` | +3/-3 | `open()` 显式 `encoding="utf-8"`；`save_config` 用 `ensure_ascii=False`（修上面 2️⃣） |
-| `providers/ollama.py` | +108/-10 | 增量剥离 `<think>`（标签可跨 chunk 分片，带状态机）；新增 `on_thinking` 回调（约 160 字合批）；显式传递 `numCtx`（修 3️⃣4️⃣） |
+| `providers/ollama.py` | +126/-11 | ①增量剥离 `<think>`（标签可跨 chunk 分片，带状态机）+ `on_thinking` 回调（约 160 字合批）+ 显式传递 `numCtx`（修 3️⃣4️⃣）；②**流式路径提取真实 `usage`**（修 6️⃣） |
 | `providers/__init__.py` | +1 | `create_provider` 向 `OllamaProvider` 透传 `numCtx` |
 | `agent/loop.py` | +4/-2 | **`run()` 新增 `on_thinking` 参数并逐层透传（修 1️⃣，bridge 硬依赖）** |
 | `agent/context.py` | +17/-1 | 强制"思考/回复跟随用户语言"；支持 `systemPrompt` 中的 `{{CURRENT_DATE}}` / `{{CURRENT_TIME}}` 占位替换 |
@@ -99,6 +112,17 @@ print('OK 定制版' if 'on_thinking' in inspect.signature(a.AgentLoop.run).para
 ```
 
 > `pipx` 用户请用 `~/.local/share/pipx/venvs/agent-mini/bin/python` 执行同一段代码。
+
+再查 `[精确Token]` 补丁在不在（不需要 ollama 在跑）：
+
+```bash
+python -c "import inspect; from agent_mini.providers.ollama import OllamaProvider; \
+s=inspect.getsource(OllamaProvider.chat_stream); \
+print('OK 带精确Token' if 'prompt_eval_count' in s and 'usage=_usage' in s else 'X 缺精确Token —— 前端只会显示(估算)')"
+```
+
+想跑真实推理验证全链路：`agent-mini-patch/verify_precise_token.py`
+（A：直接调 `provider.chat_stream` 看 `usage`；B：走 `/chat` → `/task/<id>/state` 看 `last_prompt_tokens`；两条都 PASS 才算通）。
 
 ### 从源码重建 / 回滚
 

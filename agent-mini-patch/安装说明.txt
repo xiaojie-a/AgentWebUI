@@ -3,9 +3,12 @@ agent-mini 定制包（AgentWebUI 专用）安装说明
 
 文件清单
 --------
-  agent_mini-0.3.1+agentwebui-py3-none-any.whl   已打好补丁的 agent-mini 0.3.1（纯 Python，跨平台）
+  agent_mini-0.3.1+agentwebui.2-py3-none-any.whl 已打好补丁的 agent-mini 0.3.1（纯 Python，跨平台）
   agent-mini-0.3.1-agentwebui.patch              相对官方 0.3.1 的源码补丁（可 git apply）
   SUMMARY.txt                                    逐文件改动统计
+
+  版本说明：本地版本号后缀会随改动递增（.1 → .2）。同名版本重复安装时 pip 会跳过，
+  升级请用 `pip install --force-reinstall`（或 `--upgrade`，.2 > .1 会被识别为更新）。
 
 
 为什么需要这个定制包
@@ -67,15 +70,46 @@ AgentWebUI 依赖 agent-mini，但官方 0.3.1 直接配 AgentWebUI **在任何�
   * 思考内容 <think>...</think> 会混进正文一起显示；
   * 工具搜索后端用的是 DuckDuckGo，国内不可达。
 
+【故障 6｜静默降级：前端上下文用量掉回"估算"】
+
+  官方 providers/ollama.py 只在**非流式**的 chat() 里把 prompt_eval_count /
+  eval_count 填进 ChatResponse.usage；**流式**的 chat_stream()（WebUI 默认走的
+  就是这条）直接
+      return ChatResponse(content=..., tool_calls=..., thinking=...)
+  不带 usage —— 于是 bridge 的 [精确Token] 取到的永远是 None，
+  前端"已用上下文"只能显示"(估算)"，本轮生成/总计两行也不出现。
+
+  patch 做法：在 chat_stream 的 chunk 循环里记录 prompt_eval_count / eval_count
+  （ollama 在最后一个 done chunk 里给出），返回时构造 usage 字典交给 ChatResponse。
+
+  实测（xem / Ubuntu / qwen3:1.7b，2026-09-12）：
+      直接调 provider.chat_stream  -> usage={'prompt_tokens': 16,
+                                             'completion_tokens': 182,
+                                             'total_tokens': 198}
+      走 bridge 全链路 (/task/state) -> usage={'prompt_tokens': 1851, ...}
+                                       last_prompt_tokens=1851   ← 真实系统提示量
+
+  注意：这块与【故障 1】无关，缺它只是"少个功能"，不会崩。但**前端的"精确 Token"
+  必须配它**：仓库里 agent_bridge.js / public/app.js 已经带 [精确Token] 逻辑，
+  如果装的 agent-mini 是旧包，UI 会静默退回估算值。
+
 
 安装
 ----
-    pip install agent_mini-0.3.1+agentwebui-py3-none-any.whl
+    pip install agent_mini-0.3.1+agentwebui.2-py3-none-any.whl
 
 装进虚拟环境 / 指定目录：
 
     python -m venv myenv
-    myenv/bin/pip install agent_mini-0.3.1+agentwebui-py3-none-any.whl
+    myenv/bin/pip install agent_mini-0.3.1+agentwebui.2-py3-none-any.whl
+
+装着旧定制版（+agentwebui / +agentwebui.1）要升级：
+
+    pip install --force-reinstall --no-deps agent_mini-0.3.1+agentwebui.2-py3-none-any.whl
+
+pipx 装的（如 xem）：
+
+    pipx install --force agent_mini-0.3.1+agentwebui.2-py3-none-any.whl
 
 离线机器：把 whl 拷过去，连同依赖一起装（依赖见官方包，主要是 httpx）。
 
@@ -85,10 +119,14 @@ AgentWebUI 依赖 agent-mini，但官方 0.3.1 直接配 AgentWebUI **在任何�
   1. config.py                 +3/-3    open() 显式 encoding="utf-8"，
                                        save_config 用 ensure_ascii=False
                                        【Windows 上不加会崩，见上】
-  2. providers/ollama.py       +108/-10 增量剥离 <think>…</think>（标签可跨 chunk
-                                       分片，带状态机）；新增 on_thinking 回调
-                                       （约 160 字合批，减少前端抖动）；
-                                       显式传递 numCtx 控制上下文窗口
+  2. providers/ollama.py       +126/-11 两块互相独立的补丁：
+                                       (a) [AgentWebUI patch] 增量剥离 <think>…</think>
+                                           （标签可跨 chunk 分片，带状态机）；新增
+                                           on_thinking 回调（约 160 字合批）；显式
+                                           传递 numCtx 控制上下文窗口
+                                       (b) [精确Token] 流式 chunk 里提取
+                                           prompt_eval_count / eval_count 填进
+                                           ChatResponse.usage   【新增，见故障 6】
   3. providers/__init__.py     +1       create_provider 向 OllamaProvider
                                        透传 numCtx          【与 2 必须配对】
   4. agent/loop.py             +4/-2    run() 新增 on_thinking 参数并逐层透传
@@ -148,6 +186,20 @@ AgentWebUI 依赖 agent-mini，但官方 0.3.1 直接配 AgentWebUI **在任何�
     print('OK' if c.load_config()['agent']['systemPrompt']=='中文测试' else 'FAIL')"
 
   打印 OK 即说明中文配置读写正常。
+
+  再验 [精确Token] 补丁在不在（不需要 ollama 正在运行）：
+
+    python -c "import inspect; from agent_mini.providers.ollama import OllamaProvider; \
+    s=inspect.getsource(OllamaProvider.chat_stream); \
+    print('OK' if 'prompt_eval_count' in s and 'usage=_usage' in s else 'FAIL')"
+
+  打印 OK 表示流式路径会返回真实 usage；FAIL 则前端"已用上下文"只会显示"(估算)"。
+
+  想验得更狠一点（需要 ollama 在跑，会真实推理一次，比较慢）：
+
+    xem 上实测脚本见 WorkBuddy 会话 .workbuddy/tools/verify_precise_token.py
+    （A: 直接调 provider.chat_stream 看 usage；B: 走 /chat → /task/<id>/state
+      看 last_prompt_tokens。两条都 PASS 才算全链路通。）
 
 
 卸载 / 回滚到官方版

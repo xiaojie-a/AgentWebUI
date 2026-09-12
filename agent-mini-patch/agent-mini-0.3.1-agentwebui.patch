@@ -7,12 +7,20 @@
 #   cd <解压目录>
 #   git apply -p1 agent-mini-0.3.1-agentwebui.patch
 # 或直接用仓库内已构建好的 wheel:
-#   pip install agent_mini-0.3.1+agentwebui-py3-none-any.whl
+#   pip install agent_mini-0.3.1+agentwebui.2-py3-none-any.whl
+#   （本地版本号会随改动递增，以仓库内实际文件名 / SUMMARY.txt 为准；
+#     同名版本重复安装时 pip 会跳过，需 --force-reinstall）
 #
 # 注意: 这 7 个文件是一个整体，不可只挑其中几个应用。
 #   providers/__init__.py 会向 ollama.py 传 num_ctx，
 #   agent/loop.py 会向 ollama.py 传 on_thinking，
 #   单独替换其一会出现 TypeError: unexpected keyword argument。
+#
+# 其中 providers/ollama.py 承载两块互相独立的补丁：
+#   1) [AgentWebUI patch] 流式增量剥离 <think>…</think>（标签可跨 chunk 分片）
+#   2) [精确Token] 流式响应里提取 prompt_eval_count / eval_count，
+#      填入 ChatResponse.usage —— 前端的"已用上下文(精确)"依赖它；
+#      缺这块补丁时流式路径 usage 恒为 None，前端只能显示"(估算)"。
 #
 
 --- a/agent_mini/agent/context.py
@@ -571,10 +579,13 @@
          self._client = httpx.AsyncClient(timeout=300)
  
      async def close(self) -> None:
-@@ -72,6 +92,22 @@
+@@ -72,6 +92,25 @@
          thinking_parts: list[str] = []
          last_message: dict[str, Any] = {}
          tool_calls_raw: list[dict] | None = None
++        # [精确Token] 记录流式响应中的真实 token 计数（最后一个 done chunk 携带）
++        _prompt_eval_count = 0
++        _eval_count = 0
 +
 +        # [AgentWebUI patch] 增量剥离 <think>…</think>（标签可能跨 chunk 分片）
 +        pending = ""
@@ -594,9 +605,16 @@
  
          async with self._client.stream(
              "POST",
-@@ -92,20 +128,79 @@
+@@ -91,26 +130,99 @@
+                 if message:
                      last_message = message
  
++                # [精确Token] 从 chunk 中提取真实 token 计数（通常在最后一个 done chunk 中）
++                if chunk.get("prompt_eval_count"):
++                    _prompt_eval_count = chunk["prompt_eval_count"]
++                if chunk.get("eval_count"):
++                    _eval_count = chunk["eval_count"]
++
                  delta = message.get("content") or ""
 -                if delta:
 -                    content_parts.append(delta)
@@ -683,7 +701,21 @@
          thinking = "".join(thinking_parts) or (last_message.get("thinking") or None)
          tool_calls = parse_openai_tool_calls(
              tool_calls_raw or last_message.get("tool_calls")
-@@ -125,6 +220,9 @@
+         )
+-        return ChatResponse(content=content, tool_calls=tool_calls, thinking=thinking)
++        # [精确Token] 构造真实 usage（流式响应中提取的 prompt_eval_count / eval_count）
++        _usage = None
++        if _prompt_eval_count or _eval_count:
++            _usage = {
++                "prompt_tokens": _prompt_eval_count,
++                "completion_tokens": _eval_count,
++                "total_tokens": _prompt_eval_count + _eval_count,
++            }
++        return ChatResponse(content=content, tool_calls=tool_calls, thinking=thinking, usage=_usage)
+ 
+     def _build_payload(
+         self,
+@@ -125,6 +237,9 @@
              "stream": stream,
              "options": {"temperature": temperature},
          }
@@ -693,7 +725,7 @@
          if tools:
              payload["tools"] = tools
          if self._think not in (None, ""):
-@@ -144,7 +242,7 @@
+@@ -144,7 +259,7 @@
                  ),
              }
          return ChatResponse(
