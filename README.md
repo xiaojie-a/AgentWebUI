@@ -23,7 +23,7 @@
 
 ## agent-mini 定制说明（重要）
 
-本项目依赖 [agent-mini](https://pypi.org/project/agent-mini/)，但**官方 0.3.1 直接配 AgentWebUI 会出问题**，因此仓库内提供了预先打好补丁的定制包：
+本项目依赖 [agent-mini](https://pypi.org/project/agent-mini/)，但**官方 0.3.1 配合 AgentWebUI 在任何操作系统上都无法使用**，因此仓库内提供了预先打好补丁的定制包：
 
 📦 `agent-mini-patch/agent_mini-0.3.1+agentwebui-py3-none-any.whl`
 
@@ -33,24 +33,72 @@ pip install agent-mini-patch/agent_mini-0.3.1+agentwebui-py3-none-any.whl
 
 ### 为什么需要定制
 
-1. **标准 Windows 上会直接崩**：官方 `config.py` 用 `open(CONFIG_FILE)` 不带 `encoding` 读取配置，而 `~/.agent-mini/config.json` 里面有中文（`systemPrompt` 等）。在 locale 编码为 cp936/GBK 的标准 Windows Python 上会抛
-   `UnicodeDecodeError: 'gbk' codec can't decode byte 0xa1 ...`，WebUI 直接起不来。
-2. 思考内容 `<think>…</think>` 会混进正文一起显示。
-3. 工具搜索后端用的是 DuckDuckGo，国内不可达。
+> ⚠️ **根本原因是 API 不匹配，不是编码问题——Windows / Linux / Termux / macOS 一视同仁。**
+
+**1️⃣ 硬崩，全平台（必须用定制版的原因）**
+
+`agent_bridge.js:495-497` 这样调用 agent-mini：
+
+```python
+result = await agent.run(message, conversation,
+                          on_stream=on_stream, on_tool_event=on_tool_event,
+                          on_thinking=on_thinking)
+```
+
+而官方 0.3.1 的 `AgentLoop.run()` 签名是
+`(user_message, conversation, on_stream=None, on_tool_event=None) -> str`——**没有 `on_thinking`**。
+
+于是**每一条消息发出后立刻失败**：
+
+```
+TypeError: AgentLoop.run() got an unexpected keyword argument 'on_thinking'
+```
+
+该异常被 bridge 的 `except Exception` 捕获，以 `{"error": "TypeError: ..."}` 推给前端，表现为"消息一发就报错"。
+
+- 已在 **Ubuntu + Python 3.14.4 + 官方 `pip`/`pipx` 安装版**上实测复现（`xem` 机器）。
+- 该依赖由 **`6a246f8`（2026-09-10「更新ui」）** 引入，在那之前的版本配官方包可以正常运行。
+- 与操作系统、locale、文件编码**完全无关**。
+
+**2️⃣ Windows 专属的额外一层崩溃**
+
+官方 `config.py:126` 用 `open(CONFIG_FILE)` 不带 `encoding`，走系统默认编码。在 locale 为 cp936/GBK 的标准 Windows Python 上，读取含中文（`systemPrompt` 等）的 `~/.agent-mini/config.json` 会抛
+`UnicodeDecodeError: 'gbk' codec can't decode byte 0xa1 ...`。
+
+> 注意：**这一条只在"系统默认编码非 UTF-8"时成立**。Ubuntu 默认 `LANG=zh_CN.UTF-8`，所以在 Linux 上它不会发作——不要把它当成万能解释。
+
+**3️⃣ `numCtx` 被静默丢弃（不报错，但设置是假的）**
+
+官方 `providers/__init__.py` 构造 `OllamaProvider` 时不传 `num_ctx`，于是 WebUI 设置面板里的"上下文长度"以及 `config.json` 里的 `numCtx` **完全不会生效**。
+
+**4️⃣ `<think>…</think>` 会混进正文一起显示。**
+
+**5️⃣ 工具搜索后端用的是 DuckDuckGo，国内不可达。**
 
 ### 相对官方 0.3.1 的改动（共 7 个文件）
 
 | 文件 | 改动 | 说明 |
 |---|---|---|
-| `config.py` | +3/-3 | `open()` 显式 `encoding="utf-8"`；`save_config` 用 `ensure_ascii=False` |
-| `providers/ollama.py` | +108/-10 | 增量剥离 `<think>`（标签可跨 chunk 分片，带状态机）；新增 `on_thinking` 回调（约 160 字合批）；显式传递 `numCtx` |
+| `config.py` | +3/-3 | `open()` 显式 `encoding="utf-8"`；`save_config` 用 `ensure_ascii=False`（修上面 2️⃣） |
+| `providers/ollama.py` | +108/-10 | 增量剥离 `<think>`（标签可跨 chunk 分片，带状态机）；新增 `on_thinking` 回调（约 160 字合批）；显式传递 `numCtx`（修 3️⃣4️⃣） |
 | `providers/__init__.py` | +1 | `create_provider` 向 `OllamaProvider` 透传 `numCtx` |
-| `agent/loop.py` | +4/-2 | `run()` 新增 `on_thinking` 参数并逐层透传 |
+| `agent/loop.py` | +4/-2 | **`run()` 新增 `on_thinking` 参数并逐层透传（修 1️⃣，bridge 硬依赖）** |
 | `agent/context.py` | +17/-1 | 强制"思考/回复跟随用户语言"；支持 `systemPrompt` 中的 `{{CURRENT_DATE}}` / `{{CURRENT_TIME}}` 占位替换 |
-| `agent/tools.py` | +152/-132 | 搜索后端由 DuckDuckGo 换为 Bing CN / Sogou / Baidu（国内可达） |
+| `agent/tools.py` | +152/-132 | 搜索后端由 DuckDuckGo 换为 Bing CN / Sogou / Baidu（修 5️⃣，国内可达） |
 | `cli.py` | +1/-1 | `--tools` 帮助文案 |
 
-> ⚠️ 这 7 个文件是一个整体，不能只挑几个覆盖。`providers/__init__.py` 会向 `ollama.py` 传 `num_ctx`，`agent/loop.py` 会向 `ollama.py` 传 `on_thinking`，单独替换其一会出现 `TypeError: unexpected keyword argument`。
+> ⚠️ 这 7 个文件是一个整体，不能只挑几个覆盖。
+> - **`agent/loop.py` + `providers/ollama.py` 是 `on_thinking` 通路的两端**，bridge 靠它把思考内容推给前端；只装其一仍会 `TypeError`。
+> - `providers/__init__.py` 会向 `ollama.py` 传 `num_ctx`，单独替换其一会出现 `TypeError: unexpected keyword argument`。
+
+### 一条命令自查：装的是官方版还是定制版
+
+```bash
+python -c "import inspect, agent_mini.agent as a; \
+print('OK 定制版' if 'on_thinking' in inspect.signature(a.AgentLoop.run).parameters else 'X 官方版 —— 必须换成定制包')"
+```
+
+> `pipx` 用户请用 `~/.local/share/pipx/venvs/agent-mini/bin/python` 执行同一段代码。
 
 ### 从源码重建 / 回滚
 
@@ -60,7 +108,7 @@ pip download agent-mini==0.3.1 --no-deps -d am-dl
 cd am-dl && python -c "import zipfile;zipfile.ZipFile('agent_mini-0.3.1-py3-none-any.whl').extractall('src')"
 cd src && git apply -p1 ../../agent-mini-patch/agent-mini-0.3.1-agentwebui.patch
 
-# 回滚到官方版
+# 回滚到官方版（注意：装回官方版后 WebUI 将无法使用，见上文 1️⃣）
 pip uninstall agent-mini && pip install agent-mini==0.3.1
 ```
 

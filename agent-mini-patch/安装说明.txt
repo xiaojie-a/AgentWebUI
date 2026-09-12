@@ -10,10 +10,39 @@ agent-mini 定制包（AgentWebUI 专用）安装说明
 
 为什么需要这个定制包
 --------------------
-AgentWebUI 依赖 agent-mini，但官方 0.3.1 直接配 AgentWebUI 会出问题，其中一条是硬故障：
+AgentWebUI 依赖 agent-mini，但官方 0.3.1 直接配 AgentWebUI **在任何操作系统上都会崩**。
+按严重程度排：
 
-  在标准 Windows Python 上（locale 编码 = cp936/GBK），
-  官方 config.py 用 open(CONFIG_FILE) 不带 encoding 读取配置，
+【故障 1｜硬崩，与操作系统无关 —— 这才是必须用定制版的根本原因】
+
+  agent_bridge.js:495-497 是这样调用 agent-mini 的：
+
+      result = await agent.run(message, conversation,
+                                on_stream=on_stream, on_tool_event=on_tool_event,
+                                on_thinking=on_thinking)
+
+  而官方 0.3.1 的 AgentLoop.run() 签名只有：
+
+      (self, user_message: str, conversation: list[dict],
+       on_stream=None, on_tool_event=None) -> str
+
+  —— 根本没有 on_thinking 这个参数。于是每条消息都在发出后立刻失败：
+
+      TypeError: AgentLoop.run() got an unexpected keyword argument 'on_thinking'
+
+  该异常被 bridge 的 except Exception 捕获，以 {"error": "TypeError: ..."}
+  推给前端，表现为"消息一发出去就报错"。
+
+  **Windows / Linux / Termux / macOS 一视同仁，跟编码没有任何关系。**
+  已在 Ubuntu + Python 3.14.4 + 官方 pip / pipx 安装版上实测复现。
+
+  这个依赖是 6a246f8（2026-09-10 "更新ui"）引入的；在那之前的版本
+  配官方包是可以正常跑的。
+
+【故障 2｜Windows 专属，是额外一层】
+
+  在 locale 编码为 cp936/GBK 的标准 Windows Python 上，
+  官方 config.py:126 用 open(CONFIG_FILE) 不带 encoding 读取配置，
   而 ~/.agent-mini/config.json 里面有中文（systemPrompt 等），
   于是 load_config() 直接抛 UnicodeDecodeError，WebUI 起不来。
 
@@ -22,10 +51,18 @@ AgentWebUI 依赖 agent-mini，但官方 0.3.1 直接配 AgentWebUI 会出问题
     官方写法  -> UnicodeDecodeError: 'gbk' codec can't decode byte 0xa1 ...
     patch 写法 -> 读取成功且内容正确
 
-  注意：如果运行时设了 PYTHONUTF8=1（部分环境会），这个问题会被掩盖，
+  注意 1：这一条只在"系统默认编码不是 UTF-8"时成立。Ubuntu 默认
+  LANG=zh_CN.UTF-8，所以在 Linux 上它不会发作 —— 别把它当成万能解释。
+  注意 2：如果运行时设了 PYTHONUTF8=1（部分环境会），这个问题会被掩盖，
   换一台机器才暴露，所以不要依赖"本机跑得通"。
 
-另外两条是功能性问题：
+【故障 3｜静默失效，不报错但功能没了】
+
+  官方 providers/__init__.py 构造 OllamaProvider 时不传 num_ctx，
+  于是 WebUI 设置面板里改的"上下文长度 (numCtx)"完全不生效
+  （config.json 里写了 numCtx 也会被忽略）。不崩，但设置是假的。
+
+【故障 4、5｜功能性】
 
   * 思考内容 <think>...</think> 会混进正文一起显示；
   * 工具搜索后端用的是 DuckDuckGo，国内不可达。
@@ -75,14 +112,19 @@ AgentWebUI 依赖 agent-mini，但官方 0.3.1 直接配 AgentWebUI 会出问题
       from agent_mini.config    import load_config, MEMORY_FILE
       from agent_mini.providers import create_provider
       from agent_mini.agent     import AgentLoop, Memory
-      await agent.run(message, conversation, on_stream=..., on_tool_event=...)
+      await agent.run(message, conversation,
+                      on_stream=..., on_tool_event=..., on_thinking=...)
 
-  这些在官方包里都存在，所以缺失 patch 时不会立刻报错，
-  而是以"功能缺失"或"中文配置崩溃"的形式表现。
+  前三行的导入在官方包里都存在，所以缺 patch 时"导入阶段"不会报错，
+  真正的失败发生在最后一行 —— on_thinking 是 AgentWebUI 自己加的扩展参数，
+  官方包没有，必然抛 TypeError（见【故障 1】）。
 
-  注意：当前 bridge 并没有传 on_thinking（它靠 ollama.py 的自动 <think> 剥离
-  来保证正文干净）。on_thinking 这条通路是给 Termux / 手机版 bridge 用的，
-  有默认值 None，不传不影响。
+  换句话说：**官方包 + AgentWebUI = 第一条消息就失败**，
+  不是"功能缺失"，是根本用不了。请务必安装本定制包。
+
+  补充（历史遗留）：仓库里还有一份 agent_bridge.py（Python 版桥接），
+  它的 run() 调用没有传 on_thinking，所以单看它不会触发【故障 1】；
+  但 README 已注明"python 桥街非最新版"，实际在用的是 agent_bridge.js。
 
 
 从源码重建（不想用 whl 时）
