@@ -3,13 +3,13 @@ agent-mini 定制包（AgentWebUI 专用）安装说明
 
 文件清单
 --------
-  agent_mini-0.3.1+agentwebui.3-py3-none-any.whl 已打好补丁的 agent-mini 0.3.1（纯 Python，跨平台）
+  agent_mini-0.3.1+agentwebui.4-py3-none-any.whl 已打好补丁的 agent-mini 0.3.1（纯 Python，跨平台）
   agent-mini-0.3.1-agentwebui.patch              相对官方 0.3.1 的源码补丁（可 git apply）
   SUMMARY.txt                                    逐文件改动统计
   verify_precise_token.py                        精确 Token 全链路验证（直调 provider + 走 bridge）
   verify_numctx_linkage.py                       有效上下文/压缩阈值 是否跟随 numCtx 的验证
 
-  版本说明：本地版本号后缀会随改动递增（.1 → .2 → .3）。同名版本重复安装时 pip 会跳过，
+  版本说明：本地版本号后缀会随改动递增（.1 → .2 → .3 → .4）。同名版本重复安装时 pip 会跳过，
   升级请用 `pip install --force-reinstall`（或 `--upgrade`，.3 > .2 会被识别为更新）。
 
 
@@ -128,20 +128,20 @@ AgentWebUI 依赖 agent-mini，但官方 0.3.1 直接配 AgentWebUI **在任何�
 
 安装
 ----
-    pip install agent_mini-0.3.1+agentwebui.3-py3-none-any.whl
+    pip install agent_mini-0.3.1+agentwebui.4-py3-none-any.whl
 
 装进虚拟环境 / 指定目录：
 
     python -m venv myenv
-    myenv/bin/pip install agent_mini-0.3.1+agentwebui.3-py3-none-any.whl
+    myenv/bin/pip install agent_mini-0.3.1+agentwebui.4-py3-none-any.whl
 
 装着旧定制版（+agentwebui / .1 / .2）要升级：
 
-    pip install --force-reinstall --no-deps agent_mini-0.3.1+agentwebui.3-py3-none-any.whl
+    pip install --force-reinstall --no-deps agent_mini-0.3.1+agentwebui.4-py3-none-any.whl
 
 pipx 装的（如 xem）：
 
-    pipx install --force agent_mini-0.3.1+agentwebui.3-py3-none-any.whl
+    pipx install --force agent_mini-0.3.1+agentwebui.4-py3-none-any.whl
 
 离线机器：把 whl 拷过去，连同依赖一起装（依赖见官方包，主要是 httpx）。
 
