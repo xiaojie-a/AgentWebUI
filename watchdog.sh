@@ -14,6 +14,11 @@
 set -u
 cd "$(dirname "$0")"
 
+# [永久上下文] Ollama 全局最大上下文窗口（llama-server -c 参数）
+# 修改后需重启 Ollama 生效；所有模型调用不得超过此值
+# 注：此行来自 xem 上的版本，合并进本机版（本机版另有 log/git_sync 留痕增强）
+export OLLAMA_CONTEXT_LENGTH=65536
+
 LOG="logs/watchdog.log"
 PID_FILE=".pids/watchdog.pid"
 NODE="${NODE_BIN:-node}"

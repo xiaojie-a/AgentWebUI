@@ -612,14 +612,44 @@ body {
 .ctx-row .ctx-unit { color: var(--text-2); font-size: 12px; }
 .ctx-note { color: var(--text-2); font-size: 12px; line-height: 1.6; margin: 8px 0 0; }
 .ctx-usage-bar {
-  height: 8px; border-radius: 99px; margin: 10px 0 4px;
+  height: 10px; border-radius: 99px; margin: 10px 0 6px;
   background: rgba(127, 127, 127, 0.18); overflow: hidden;
+  display: flex; gap: 1px;
 }
 .ctx-usage-bar > i {
   display: block; height: 100%; width: 0%;
-  border-radius: 99px;
-  background: linear-gradient(90deg, #7c6cff, #ff6ec7);
-  transition: width 0.35s ease;
+  transition: width 0.3s ease;
 }
+.ctx-usage-bar > i:first-child { border-radius: 99px 0 0 99px; }
+.ctx-usage-bar > i:last-child { border-radius: 0 99px 99px 0; }
+.ctx-usage-bar > i:only-child { border-radius: 99px; }
+/* 堆叠分段颜色 */
+.ctx-usage-bar > i.seg-thinking { background: #e5484d; }
+.ctx-usage-bar > i.seg-content  { background: #30a46c; }
+.ctx-usage-bar > i.seg-tool     { background: #e5a52d; }
+.ctx-usage-bar > i.seg-system   { background: #4c9aff; }
+.ctx-usage-bar > i.seg-other    { background: rgba(127,127,127,0.4); }
+/* 旧的单段渐变（兼容） */
+.ctx-usage-bar > i.seg-legacy   { background: linear-gradient(90deg, #7c6cff, #ff6ec7); }
 .ctx-usage-bar > i.warn { background: #e5a52d; }
 .ctx-usage-bar > i.danger { background: #e5484d; }
+/* 图例 */
+.ctx-legend {
+  display: flex; flex-wrap: wrap; gap: 8px 14px;
+  margin: 6px 0 10px; font-size: 12px; color: #94a3b8;
+}
+.ctx-legend > span {
+  display: inline-flex; align-items: center; gap: 5px;
+}
+.ctx-legend > span::before {
+  content: ""; display: inline-block; width: 10px; height: 10px;
+  border-radius: 3px; flex-shrink: 0;
+}
+.ctx-legend > span.leg-thinking::before { background: #e5484d; }
+.ctx-legend > span.leg-content::before  { background: #30a46c; }
+.ctx-legend > span.leg-tool::before     { background: #e5a52d; }
+.ctx-legend > span.leg-system::before   { background: #4c9aff; }
+.ctx-legend > span.leg-other::before    { background: rgba(127,127,127,0.4); }
+/* 分类明细行 */
+.ctx-breakdown { margin: 4px 0 8px; }
+.ctx-breakdown .info-row { font-size: 12px; padding: 2px 0; }

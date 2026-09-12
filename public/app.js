@@ -56,9 +56,114 @@
     return Math.max(1, Math.round(cjk * 0.7 + (s.length - cjk) / 4)); // 粗略估算
   }
   function convUsedTokens(conv) {
+    // [精确Token] 优先使用真实数据：最后一条 assistant 消息中保存的 last_prompt_tokens
+    if (conv && conv.messages) {
+      for (let i = conv.messages.length - 1; i >= 0; i--) {
+        const m = conv.messages[i];
+        if (m.role === "assistant" && m.usage && m.usage.last_prompt_tokens > 0) {
+          return m.usage.last_prompt_tokens;
+        }
+      }
+    }
     let n = 0;
     for (const m of (conv && conv.messages) || []) n += estimateTokens(m && m.content);
     return n;
+  }
+  function convEstimatedTokens(conv) {
+    let n = 0;
+    for (const m of (conv && conv.messages) || []) n += estimateTokens(m && m.content);
+    return n;
+  }
+  function convUsedTokensByType(conv) {
+    const byType = { thinking: 0, content: 0, tool: 0, system: 0, other: 0 };
+    if (!conv || !conv.messages) return byType;
+    for (const m of conv.messages) {
+      if (!m) continue;
+      if (m.role === "system") byType.system += estimateTokens(m.content);
+      else if (m.role === "assistant") {
+        if (m.reasoning) byType.thinking += estimateTokens(m.reasoning);
+        if (m.content) byType.content += estimateTokens(m.content);
+        if (m.tools && m.tools.length) {
+          for (const t of m.tools) {
+            byType.tool += estimateTokens(t.arguments ? JSON.stringify(t.arguments) : "");
+            byType.tool += estimateTokens(t.result_preview || "");
+          }
+        }
+      } else if (m.role === "tool") byType.tool += estimateTokens(m.content);
+      else if (m.role === "user") byType.other += estimateTokens(m.content);
+      else byType.other += estimateTokens(m.content || "");
+    }
+    return byType;
+  }
+  function renderStackedBar(byType, total, isReal, completionTokens) {
+    const maxForPct = ctxMax > 0 ? ctxMax : 1;
+    const segs = [
+      { key: "thinking", cls: "seg-thinking", label: "深度思考", val: byType.thinking || 0 },
+      { key: "content",  cls: "seg-content",  label: "正文",     val: byType.content || 0 },
+      { key: "tool",     cls: "seg-tool",     label: "工具调用", val: byType.tool || 0 },
+      { key: "system",   cls: "seg-system",   label: "系统提示", val: byType.system || 0 },
+      { key: "other",    cls: "seg-other",    label: "用户输入", val: byType.other || 0 },
+    ];
+    let barHtml = "";
+    for (const s of segs) {
+      if (s.val <= 0) continue;
+      const w = Math.min(100, (s.val / maxForPct) * 100);
+      barHtml += `<i class="${s.cls}" style="width:${w.toFixed(1)}%" title="${s.label}: ${s.val.toLocaleString()} tokens"></i>`;
+    }
+    if (!barHtml) barHtml = '<i class="seg-other" style="width:0%"></i>';
+    barHtml = '<div class="ctx-usage-bar">' + barHtml + '</div>';
+    let legendHtml = '<div class="ctx-legend">';
+    for (const s of segs) {
+      if (s.val <= 0) continue;
+      const pct = total > 0 ? Math.round((s.val / total) * 100) : 0;
+      legendHtml += `<span class="leg-${s.key}">${s.label} ${s.val.toLocaleString()} (${pct}%)</span>`;
+    }
+    legendHtml += "</div>";
+    let detailHtml = '<div class="ctx-breakdown">';
+    for (const s of segs) {
+      if (s.val <= 0) continue;
+      detailHtml += `<div class="info-row"><span>${s.label}</span><b>${s.val.toLocaleString()} tokens</b></div>`;
+    }
+    detailHtml += "</div>";
+    return barHtml + legendHtml + detailHtml;
+  }
+  let _ctxLiveTimer = null;
+  let _ctxLivePending = false;
+  function updateCtxLive(ctx) {
+    if (!ctx) return;
+    if (_ctxLiveTimer) { _ctxLivePending = true; return; }
+    _ctxLiveTimer = setTimeout(() => {
+      _ctxLiveTimer = null;
+      if (_ctxLivePending) { _ctxLivePending = false; updateCtxLive(ctx); }
+    }, 150);
+    const conv = currentConv();
+    let byType = convUsedTokensByType(conv);
+    const live = ctx.liveTokens || { reasoning: 0, content: 0, tool: 0 };
+    byType.thinking += live.reasoning;
+    byType.content += live.content;
+    byType.tool += live.tool;
+    const total = byType.thinking + byType.content + byType.tool + byType.system + byType.other;
+    const p = ctxMax > 0 ? total / ctxMax : 0;
+    const pp = Math.min(1, Math.max(0, p));
+    if (ctxRingArc) {
+      ctxRingArc.style.strokeDashoffset = String(CTX_RING_C * (1 - pp));
+      ctxRingArc.classList.toggle("warn", pp > 0.8 && pp <= 0.95);
+      ctxRingArc.classList.toggle("danger", pp > 0.95);
+      ctxRing.title = `上下文 ${total.toLocaleString()} / ${ctxMax.toLocaleString()} tokens（约 ${Math.round(pp * 100)}%）`;
+    }
+    if (ctxModal && !ctxModal.hidden) {
+      const usedEl = ctxDetail.querySelector(".info-row b");
+      if (usedEl) usedEl.innerHTML = `${total.toLocaleString()} tokens <small style="color:#fbbf24">(流式估算)</small>`;
+      const oldBar = ctxDetail.querySelector(".ctx-usage-bar");
+      const oldLegend = ctxDetail.querySelector(".ctx-legend");
+      const oldBreakdown = ctxDetail.querySelector(".ctx-breakdown");
+      const stackedHtml = renderStackedBar(byType, total, false, 0);
+      const tmp = document.createElement("div");
+      tmp.innerHTML = stackedHtml;
+      if (oldBar) oldBar.replaceWith(tmp.querySelector(".ctx-usage-bar"));
+      if (oldLegend) oldLegend.replaceWith(tmp.querySelector(".ctx-legend"));
+      if (oldBreakdown) oldBreakdown.replaceWith(tmp.querySelector(".ctx-breakdown"));
+    }
   }
   function updateCtxRing() {
     if (!ctxRing || !ctxRingArc) return;
@@ -92,10 +197,27 @@
     const conv = currentConv();
     const msgCount = conv ? conv.messages.length : 0;
     const charLen = conv ? conv.messages.reduce((a, m) => a + String((m && m.content) || "").length, 0) : 0;
+    const estimated = convEstimatedTokens(conv);
+    let byType = convUsedTokensByType(conv);
+    const estTotal = byType.thinking + byType.content + byType.tool + byType.system + byType.other;
+    const hasReal = used !== estimated;
+    if (hasReal && used > 0 && estTotal > 0) {
+      const ratio = used / estTotal;
+      byType = { thinking: Math.round(byType.thinking*ratio), content: Math.round(byType.content*ratio), tool: Math.round(byType.tool*ratio), system: Math.round(byType.system*ratio), other: Math.round(byType.other*ratio) };
+    }
+    const lastMsg = conv && conv.messages.length ? conv.messages[conv.messages.length-1] : null;
+    const lastUsage = lastMsg && lastMsg.role === "assistant" ? lastMsg.usage : null;
+    const completionTokens = lastUsage && lastUsage.completion_tokens ? lastUsage.completion_tokens : 0;
+    const totalTokens = lastUsage && lastUsage.total_tokens ? lastUsage.total_tokens : 0;
+    const stackedHtml = renderStackedBar(byType, used, hasReal, completionTokens);
+
     ctxDetail.innerHTML =
-      `<div class="info-row"><span>已用</span><b>${used.toLocaleString()} tokens</b></div>` +
+      `<div class="info-row"><span>已用上下文</span><b>${used.toLocaleString()} tokens${hasReal ? ' <small style="color:#4ade80">(精确)</small>' : ' <small style="color:#fbbf24">(估算)</small>'}</b></div>` +
       `<div class="info-row"><span>占用率</span><b>${Math.round(pct * 100)}%</b></div>` +
-      `<div class="ctx-usage-bar"><i class="${pct > 0.8 ? "warn" : ""}${pct > 0.95 ? " danger" : ""}" style="width:${Math.min(100, pct * 100)}%"></i></div>` +
+      stackedHtml +
+      (hasReal ? `<div class="info-row"><span>粗略估算</span><b style="color:#94a3b8">${estimated.toLocaleString()} tokens</b></div>` : "") +
+      (completionTokens > 0 ? `<div class="info-row"><span>本轮生成</span><b>${completionTokens.toLocaleString()} tokens</b></div>` : "") +
+      (totalTokens > 0 ? `<div class="info-row"><span>本轮总计</span><b>${totalTokens.toLocaleString()} tokens</b></div>` : "") +
       `<div class="info-row"><span>会话消息</span><b>${msgCount} 条</b></div>` +
       `<div class="info-row"><span>文本长度</span><b>${charLen.toLocaleString()} 字符</b></div>` +
       `<div class="info-row"><span>当前模型</span><b>${esc(cfgProvider)} · ${esc(cfgModel || "?")}</b></div>`;
@@ -494,26 +616,32 @@
               // ctx.full 并驱动打字机渲染）。这里若再 ctx.full += data.content 会双加，
               // 导致正文/历史记录整段重复（思考 reasoning 只走 addThink 一条路所以不重复）。
               if (ctx.addText) ctx.addText(data.content);
+              if (ctx.liveTokens) ctx.liveTokens.content += estimateTokens(data.content);
               if (ctx.setCursor) ctx.setCursor(true);
               if (ctx.smartScroll) ctx.smartScroll(); else scrollBottom();
+              updateCtxLive(ctx);
             }
             if (data.tool) {
               ctx.tools.push(data.tool);
               if (ctx.addTool) ctx.addTool(data.tool);
+              if (ctx.liveTokens) { ctx.liveTokens.tool += estimateTokens(data.tool.arguments ? JSON.stringify(data.tool.arguments) : ""); ctx.liveTokens.tool += estimateTokens(data.tool.result_preview || ""); }
               if (ctx.setCursor) ctx.setCursor(true);
               if (ctx.smartScroll) ctx.smartScroll(); else scrollBottom();
+              updateCtxLive(ctx);
             }
             if (data.reasoning) {
               if (ctx.addThink) ctx.addThink(data.reasoning);
+              if (ctx.liveTokens) ctx.liveTokens.reasoning += estimateTokens(data.reasoning);
               if (ctx.setCursor) ctx.setCursor(true);
               if (ctx.smartScroll) ctx.smartScroll(); else scrollBottom();
+              updateCtxLive(ctx);
             }
             // 模型长时间无输出（Ollama 超时后 agent 内部重试）时的保活提示
             if (data.status === "working" && !ctx.full && !ctx.tools.length) {
               ctx.statusTip = `⏳ 模型响应较慢，请稍候…（已等待 ${data.silent_seconds || 0} 秒）`;
               if (ctx.syncTip) ctx.syncTip();
             }
-            if (data.done) { if (ctx.setCursor) ctx.setCursor(false); ctx.normalDone = true; return; }
+            if (data.done) { if (ctx.setCursor) ctx.setCursor(false); ctx.normalDone = true; ctx.usage = data.usage || null; ctx.last_prompt_tokens = data.last_prompt_tokens || 0; return; }
             if (data.cancelled) { if (ctx.setCursor) ctx.setCursor(false); return; }
             if (data.error) { if (ctx.setCursor) ctx.setCursor(false); throw new Error(data.error); }
           }
@@ -558,7 +686,7 @@
     abortCtrl = new AbortController();
     // 有序渲染节点：{type:"text", value} | {type:"tool", tool}
     // 流式过程增量更新（不重建 DOM、不重触发动画），工具卡片按到达顺序插入，不再固定堆在文本上方
-    const ctx = { full: "", tools: [], reasoning: "", nodes: [], nodeEls: [], statusTip: TIP_WAIT, phase: "wait", normalDone: false, eventIndex: 0, textShown: 0, drainTimer: null, pendingDone: false };
+    const ctx = { full: "", tools: [], reasoning: "", nodes: [], nodeEls: [], statusTip: TIP_WAIT, phase: "wait", normalDone: false, eventIndex: 0, textShown: 0, drainTimer: null, pendingDone: false, usage: null, last_prompt_tokens: 0, liveTokens: { reasoning: 0, content: 0, tool: 0 } };
     bubble.innerHTML = `<div class="stream-body"></div>`;
     const bodyEl = bubble.firstElementChild;
     const tipEl = document.createElement("div");
@@ -847,6 +975,7 @@
           content: ctx.full,
           tools: ctx.tools.length ? ctx.tools : undefined,
           reasoning: ctx.reasoning || undefined,
+          usage: ctx.usage ? { ...ctx.usage, last_prompt_tokens: ctx.last_prompt_tokens || 0 } : undefined,
         });
         saveConvs();
       }
@@ -893,6 +1022,7 @@
             content,
             tools: st.tools && st.tools.length ? st.tools : undefined,
             reasoning: st.reasoning || undefined,
+            usage: st.usage ? { ...st.usage, last_prompt_tokens: st.last_prompt_tokens || 0 } : undefined,
           });
           saveConvs();
         }
@@ -903,7 +1033,7 @@
       return;
     }
 
-    const ctx = { full: st.content || "", tools: st.tools || [], reasoning: st.reasoning || "", nodes: [], nodeEls: [], statusTip: "", phase: "wait", normalDone: false, eventIndex: st.event_count || 0, textShown: 0, drainTimer: null, pendingDone: false };
+    const ctx = { full: st.content || "", tools: st.tools || [], reasoning: st.reasoning || "", nodes: [], nodeEls: [], statusTip: "", phase: "wait", normalDone: false, eventIndex: st.event_count || 0, textShown: 0, drainTimer: null, pendingDone: false, usage: st.usage || null, last_prompt_tokens: st.last_prompt_tokens || 0, liveTokens: { reasoning: 0, content: 0, tool: 0 } };
     let bubble = null;
     let bodyEl = null;
     let tipEl = null;
@@ -1148,6 +1278,7 @@
           content: ctx.full,
           tools: ctx.tools.length ? ctx.tools : undefined,
           reasoning: ctx.reasoning || undefined,
+          usage: ctx.usage ? { ...ctx.usage, last_prompt_tokens: ctx.last_prompt_tokens || 0 } : undefined,
         });
         saveConvs();
       }

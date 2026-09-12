@@ -464,6 +464,34 @@ async def main():
         config = load_config()
         provider = create_provider(config)
         memory = Memory(MEMORY_FILE, max_entries=config.get("memory", {}).get("maxEntries", 1000))
+
+        # [精确Token] 包装 provider，记录最后一次 LLM 调用的真实 usage
+        # turn_usage 是累加值（多轮工具调用会重复计算历史），
+        # 而最后一次调用的 prompt_tokens 才是当前会话的真实上下文用量。
+        _last_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        class _UsageTracker:
+            def __init__(self, inner):
+                self._inner = inner
+            @property
+            def name(self):
+                return self._inner.name
+            @property
+            def model_name(self):
+                return self._inner.model_name
+            async def chat(self, messages, tools=None, temperature=0.7):
+                resp = await self._inner.chat(messages, tools=tools, temperature=temperature)
+                if getattr(resp, "usage", None):
+                    _last_usage.update(resp.usage)
+                return resp
+            async def chat_stream(self, messages, on_delta, tools=None, temperature=0.7, on_thinking=None):
+                resp = await self._inner.chat_stream(messages, on_delta, tools=tools, temperature=temperature, on_thinking=on_thinking)
+                if getattr(resp, "usage", None):
+                    _last_usage.update(resp.usage)
+                return resp
+            async def close(self):
+                await self._inner.close()
+        provider = _UsageTracker(provider)
+
         agent = AgentLoop(provider, config, memory)
 
         # 从 base64 还原消息与会话历史（Node 侧传入，防注入）
@@ -503,7 +531,7 @@ async def main():
         if isinstance(result, str) and (result.startswith("Error") or result.startswith("Reached maximum")):
             emit({"error": result})
         else:
-            emit({"done": True, "usage": agent.turn_usage})
+            emit({"done": True, "usage": agent.turn_usage, "last_prompt_tokens": _last_usage["prompt_tokens"]})
 
         await agent.close()
 
@@ -558,12 +586,19 @@ asyncio.run(main())
             .filter(e => e.tool)
             .map(e => e.tool);
 
+        // [精确Token] 从 done 事件中提取真实 usage 数据
+        const doneEvent = task.events.filter(e => e.done).pop();
+        const usage = doneEvent && doneEvent.usage ? doneEvent.usage : null;
+        const last_prompt_tokens = doneEvent && doneEvent.last_prompt_tokens ? doneEvent.last_prompt_tokens : 0;
+
         return {
             task_id: task.id,
             status: task.status,
             content: content,
             tools: tools,
-            event_count: task.events.length
+            event_count: task.events.length,
+            usage: usage,
+            last_prompt_tokens: last_prompt_tokens
         };
     }
 }
